@@ -1,0 +1,6 @@
+{
+  "imu_prediction": {
+    // Maximum rate (Hz) at which the IMU-predicted odometry is published on ~/predicted_odom.
+    "max_publish_rate": 25.0
+  }
+}

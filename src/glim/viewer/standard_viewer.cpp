@@ -152,6 +152,11 @@ void StandardViewer::viewer_loop() {
 
   if (point_size_metric) {
     viewer->shader_setting().set_point_scale_metric();
+  } else {
+    // Force screen-space sizing explicitly. Newer Iridescence defaults to metric
+    // point scaling, so without this a non-metric point_size (e.g. 10.0) would be
+    // interpreted as 10 meters, making all points enormous.
+    viewer->shader_setting().set_point_scale_screenspace();
   }
 
   if (point_shape_circle) {

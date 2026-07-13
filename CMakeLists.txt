@@ -84,6 +84,7 @@ add_library(glim SHARED
   src/glim/odometry/odometry_estimation_imu.cpp
   src/glim/odometry/odometry_estimation_ct.cpp
   src/glim/odometry/odometry_estimation_cpu.cpp
+  src/glim/odometry/map_alignment.cpp
   # mapping
   src/glim/mapping/callbacks.cpp
   src/glim/mapping/sub_map.cpp
@@ -147,6 +148,54 @@ foreach(module_src IN LISTS module_srcs)
   )
   list(APPEND glim_LIBRARIES ${module_name})
 endforeach()
+
+# ROS2-only modules (need rclcpp / tf2 / message packages)
+if(DEFINED ENV{ROS_VERSION} AND $ENV{ROS_VERSION} EQUAL 2)
+  find_package(ament_cmake REQUIRED)
+  find_package(rclcpp REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  find_package(nav_msgs REQUIRED)
+  find_package(geometry_msgs REQUIRED)
+  find_package(tf2 REQUIRED)
+  find_package(tf2_ros REQUIRED)
+  find_package(tf2_eigen REQUIRED)
+
+  # IMU prediction extension module (publishes high-rate predicted odometry)
+  add_library(imu_prediction SHARED
+    src/glim/odometry/imu_prediction_module.cpp
+    src/glim/odometry/imu_prediction_module_ros2.cpp
+    src/glim/odometry/imu_prediction_module_create.cpp
+  )
+  target_link_libraries(imu_prediction
+    glim
+  )
+  ament_target_dependencies(imu_prediction rclcpp sensor_msgs nav_msgs geometry_msgs)
+  list(APPEND glim_LIBRARIES imu_prediction)
+
+  # External ("sim-mode") odometry frontend (trusts an external odom->lidar TF)
+  add_library(odometry_estimation_external SHARED
+    src/glim/odometry/odometry_estimation_external.cpp
+    src/glim/odometry/odometry_estimation_external_ros2.cpp
+    src/glim/odometry/odometry_estimation_external_create.cpp
+  )
+  target_link_libraries(odometry_estimation_external
+    glim
+  )
+  ament_target_dependencies(odometry_estimation_external rclcpp tf2 tf2_ros tf2_eigen geometry_msgs)
+  list(APPEND glim_LIBRARIES odometry_estimation_external)
+
+  # Localizer odometry frontend (localizes within a fixed, pre-loaded prior map)
+  add_library(odometry_estimation_localizer SHARED
+    src/glim/odometry/odometry_estimation_localizer.cpp
+    src/glim/odometry/odometry_estimation_localizer_ros2.cpp
+    src/glim/odometry/odometry_estimation_localizer_create.cpp
+  )
+  target_link_libraries(odometry_estimation_localizer
+    glim
+  )
+  ament_target_dependencies(odometry_estimation_localizer rclcpp tf2 tf2_ros tf2_eigen geometry_msgs nav_msgs)
+  list(APPEND glim_LIBRARIES odometry_estimation_localizer)
+endif()
 
 
 if(BUILD_WITH_VIEWER)

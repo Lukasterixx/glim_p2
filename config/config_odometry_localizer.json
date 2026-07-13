@@ -1,0 +1,64 @@
+{
+  /*** Localization-in-prior-map odometry estimation ***
+  // Loads a map previously produced by GlobalMapping::save and localizes within it in real time
+  // using live IMU + LiDAR. The prior map is a FIXED registration target: it never grows or drifts.
+  // The estimator works directly in the prior map's coordinate frame.
+  //
+  // Pair this with libsub_mapping_passthrough.so and disable global mapping
+  // (glim_ros/enable_global_mapping = false) so no new map is built while localizing.
+  //
+  // prior_map_path         : Directory of a GlobalMapping::save dump (contains 000000/, 000001/, graph.txt, ...)
+  // init_T_world_imu       : Initial IMU pose in the MAP frame [x, y, z, qx, qy, qz, qw]. When set,
+  //                          the estimator starts here (LOOSE gravity-only init is skipped).
+  // init_v_world_imu       : Initial IMU velocity in the MAP frame [vx, vy, vz]
+  // init_pose_damping_scale: Prior strength on the first pose. Loosen from 1e10 so the first scans
+  //                          can snap onto the map when the given pose is slightly off.
+  // enable_relocalization  : Subscribe to `initialpose_topic` and snap the estimate to poses sent
+  //                          from RViz "2D Pose Estimate" at runtime.
+  // initialpose_topic      : geometry_msgs/PoseWithCovarianceStamped topic, interpreted as T_map_imu.
+  //
+  // enable_gpu             : Use GPU VGICP (GaussianVoxelMapGPU + IntegratedVGICPFactorGPU, tightly
+  //                          coupled). Requires a CUDA build of gtsam_points; falls back to CPU otherwise.
+  // registration_type / vgicp_* : Frame-to-prior-map VGICP registration settings.
+  // target_downsampling_rate    : Random-subsample the prior map points once at load (<=0 or >=0.99 keeps all).
+  */
+  "odometry_estimation": {
+    "so_name": "libodometry_estimation_localizer.so",
+
+    // Prior map
+    "prior_map_path": "/tmp/dump",
+
+    // Initialization params (initial pose in the MAP frame)
+    "initialization_mode": "NAIVE",
+    "initialization_window_size": 1.0,
+    // "init_T_world_imu": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+    // "init_v_world_imu": [0.0, 0.0, 0.0],
+    "init_pose_damping_scale": 1e4,
+
+    // Optimizer params
+    "smoother_lag": 5.0,
+    "use_isam2_dogleg": false,
+    "isam2_relinearize_skip": 1,
+    "isam2_relinearize_thresh": 0.1,
+    "fix_imu_bias": false,
+    "compute_covs": false,
+
+    // Registration settings (frame-to-prior-map)
+    "enable_gpu": false,
+    "registration_type": "VGICP",
+    "max_iterations": 8,
+    "target_downsampling_rate": 1.0,
+    "vgicp_resolution": 0.5,
+    "vgicp_voxelmap_levels": 2,
+    "vgicp_voxelmap_scaling_factor": 2.0,
+
+    // Runtime relocalization (RViz "2D Pose Estimate")
+    "enable_relocalization": true,
+    "initialpose_topic": "/initialpose",
+
+    // Misc
+    "validate_imu": true,
+    "save_imu_rate_trajectory": false,
+    "num_threads": 2
+  }
+}

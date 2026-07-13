@@ -1,0 +1,41 @@
+{
+  /*** OdometryEstimationExternal ("sim-mode") ***
+  // Trusts an external "odom -> lidar" transform (looked up via TF) as the sensor pose
+  // for every scan, instead of estimating odometry. No IMU is used. Pair this with
+  // libsub_mapping_passthrough.so so the mapping backend keeps the external poses verbatim.
+  //
+  // so_name        : Shared library implementing the odometry frontend
+  // num_threads    : Threads used for point covariance estimation
+  // lookup_timeout : Max time [sec] to wait for the external transform of a scan to arrive
+  //
+  // The parent/child frames of the external transform are read from config_ros.json:
+  //   odom_frame_id  (parent, used as the mapping world frame)
+  //   lidar_frame_id (child, must match the point cloud frame)
+  //
+  // --- Sim-mode one-shot localization against a saved map ---
+  // The external transform is ground-truth (never drifts), so localization is a ONE-SHOT initial
+  // alignment: accumulate a few seconds of scans, globally register them onto a saved map
+  // (FPFH + RANSAC/GNC, any yaw, within search_radius_m), and publish the saved_map->odom offset
+  // on ~/<offset_topic>. Mapping/visualization continue as when localize is off; no per-scan
+  // correction is applied. For a no-save localize session, also set enable_global_mapping:false
+  // in config_ros.json.
+  */
+  "odometry_estimation": {
+    "so_name": "libodometry_estimation_external.so",
+    "num_threads": 4,
+    "lookup_timeout": 0.1,
+
+    "localize": false,
+    "prior_map_path": "/tmp/dump",
+    "accumulation_secs": 3.0,
+    "search_radius_m": 1.5,
+    "dof": 4,
+    "min_inlier_rate": 0.5,
+    "align_voxel_resolution": 0.5,
+    "align_fpfh_radius": 2.5,
+    "registration": "RANSAC",
+    "publish_tf": false,
+    "saved_map_frame_id": "saved_map",
+    "offset_topic": "map_localization"
+  }
+}

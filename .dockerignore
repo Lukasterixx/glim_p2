@@ -1,3 +1,9 @@
 .git/*
 docs/*
 docker/*
+# Keep the sim-mode glim_ros2 patch in the build context (see docker/sim/rviz_viewer.cpp)
+!docker/sim
+!docker/sim/rviz_viewer.cpp
+build/*
+install/*
+log/*

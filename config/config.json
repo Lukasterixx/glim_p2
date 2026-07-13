@@ -7,8 +7,11 @@
     "config_viewer": "config_viewer.json",
     "config_sensors": "config_sensors.json",
     "config_preprocess": "config_preprocess.json",
+    // Odometry frontend. Swap to "config_odometry_localizer.json" to localize within a saved map,
+    // or "config_odometry_external.json" for sim-mode (trust an external odom->lidar TF).
     "config_odometry": "config_odometry_gpu.json",
     "config_sub_mapping": "config_sub_mapping_gpu.json",
-    "config_global_mapping": "config_global_mapping_gpu.json"
+    "config_global_mapping": "config_global_mapping_gpu.json",
+    "config_imu_prediction": "config_imu_prediction.json"
   }
 }

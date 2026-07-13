@@ -150,7 +150,10 @@ void StandardViewer::set_callbacks() {
           break;
       }
 
-      viewer->update_drawable("current_frame", cloud_buffer, shader_setting.add("point_scale", 2.0f));
+      // NOTE: no "point_scale" here. The current metric-mode Iridescence interprets a
+      // point_scale of 2.0 as ~2 m (giant points) rather than a 2x multiplier, so we
+      // render the current scan at the same point size as the rest of the cloud.
+      viewer->update_drawable("current_frame", cloud_buffer, shader_setting);
       viewer->update_drawable("current_coord", glk::Primitives::coordinate_system(), guik::VertexColor(pose * Eigen::UniformScaling<float>(1.5f)));
       viewer->update_drawable("frame_" + std::to_string(new_frame->id), cloud_buffer, shader_setting_rainbow);
     });

@@ -111,6 +111,9 @@ void InteractiveViewer::viewer_loop() {
 
   if (point_size_metric) {
     viewer->shader_setting().set_point_scale_metric();
+  } else {
+    // Force screen-space sizing; newer Iridescence defaults to metric otherwise.
+    viewer->shader_setting().set_point_scale_screenspace();
   }
 
   if (point_shape_circle) {
