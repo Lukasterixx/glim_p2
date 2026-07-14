@@ -1,0 +1,66 @@
+# GLIM fork test container for NVIDIA Jetson (the dog).
+#
+# GPU / OpenCV access is set up the SAME way as P2Dingo's robot container
+# (P2Dingo/docker-compose.yaml): `runtime: nvidia` + NVIDIA_VISIBLE_DEVICES/
+# NVIDIA_DRIVER_CAPABILITIES expose the L4T driver, CUDA, and the NVIDIA-built
+# (CUDA-accelerated) OpenCV from the base image. GLIM itself runs on the GPU
+# (built with CUDA; config selects the *_gpu modules).
+#
+# Names are deliberately DISTINCT from the robot/sim stacks so this can run
+# alongside them without clobbering anything:
+#   image:          glim_p2_jetson   (cf. sim glim_cyclone, robot p2dingo)
+#   container_name: glim_p2_test     (cf. sim glim_ros2, robot p2dingo)
+#
+# Build + run from the repo root:
+#   docker compose -f docker/jetson/docker-compose.yaml up --build
+services:
+  glim:
+    build:
+      # Repo root — the Dockerfile does `COPY . $WS/src/glim` to build the fork.
+      context: ../..
+      dockerfile: docker/jetson/Dockerfile
+    image: glim_p2_jetson
+    container_name: glim_p2_test
+
+    # Share the host stack so this container sees the topics published by the
+    # already-running robot container over CycloneDDS.
+    network_mode: host
+    ipc: host
+    privileged: true
+
+    # GPU access, exactly as P2Dingo's robot container does it on Jetson.
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - CYCLONEDDS_URI=file:///root/cyclonedds_go2.xml
+      - QT_X11_NO_MITSHM=1
+
+    restart: "no"
+    stdin_open: true
+    tty: true
+    ulimits:
+      memlock: -1
+
+    volumes:
+      # X11 socket (only needed if you run the GLIM viewer with a display).
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # GLIM config. Default = the repo's own config/ (GPU modules) baked into the
+      # image. To test the fork with the robot-tuned config, uncomment and point
+      # this at the robot's glim_config (e.g. P2Dingo/Isaac/go2_omniverse/glim_config):
+      # - /path/to/P2Dingo/Isaac/go2_omniverse/glim_config:/glim/config:ro
+      # Persist GLIM's map dump (written on clean SIGINT shutdown) to the host.
+      - ./glim_dump:/tmp/dump
+      - /etc/localtime:/etc/localtime:ro
+
+    # SIGINT (not SIGTERM) so glim_rosnode shuts down cleanly and serializes its
+    # map dump to /tmp/dump — same as the robot on Ctrl+C. Allow time for a large map.
+    stop_signal: SIGINT
+    stop_grace_period: 120s
+
+    command: >
+      ros2 run glim_ros glim_rosnode
+      --ros-args -p config_path:=/glim/config
