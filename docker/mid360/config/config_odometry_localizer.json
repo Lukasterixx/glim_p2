@@ -4,10 +4,10 @@
   // using live IMU + LiDAR. The prior map is a FIXED registration target: it never grows or drifts.
   //
   // Frame handling (offset-based): the estimator runs forever in its own continuous odometry
-  // frame and is NEVER snapped (snapping a fixed-lag smoother across meters corrupts its
-  // velocity/bias states). Global alignment (auto-bootstrap / /initialpose) only updates the
+  // frame and is NEVER snapped. Global alignment (auto-bootstrap / /initialpose) only updates the
   // saved_map->odom offset, published as ~/map_localization + ~/localized_odom (and, with
-  // publish_tf, the saved_map->odom TF).
+  // publish_tf, the saved_map->odom TF). Consume the map-frame pose by composing that offset with
+  // the odom->base TF.
   //
   // Pair this with libsub_mapping_passthrough.so and disable global mapping
   // (glim_ros/enable_global_mapping = false) so no new map is built while localizing.
@@ -48,7 +48,7 @@
     "compute_covs": false,
 
     // Registration settings (frame-to-prior-map)
-    "enable_gpu": false,
+    "enable_gpu": true,
     "registration_type": "VGICP",
     "max_iterations": 8,
     "target_downsampling_rate": 1.0,
@@ -56,40 +56,24 @@
     "vgicp_voxelmap_levels": 2,
     "vgicp_voxelmap_scaling_factor": 2.0,
 
-    // Live rolling local map (CPU path only): mapping for robustness, not for persistence.
-    // Each live scan is matched against a short, LRU-bounded voxelmap of recent scans IN ADDITION
-    // to the fixed prior map, stabilizing scan matching where the prior map is too sparse. The
-    // prior map itself is never grown or saved.
-    // enable_live_mapping        : Turn the rolling live map on/off.
-    // live_map_resolution        : Live voxelmap resolution (m); defaults to vgicp_resolution if omitted.
-    // live_map_lru_thresh        : LRU horizon in inserts (~scans kept). 75 ≈ 7 s at 10 Hz.
-    // live_map_downsampling_rate : Random subsample rate for the live-map source/insert.
-    // live_map_gap_only          : Insert live points ONLY where the prior map is thin. Keep this on:
-    //                              VGICP weight scales with correspondence count, so a live map that
-    //                              overlaps well-covered prior regions out-votes the prior and causes
-    //                              runaway drift. Gap-only makes the live map fill holes, not compete.
-    // live_map_gap_min_points    : Finest-level prior voxel with >= this many points counts as covered.
-    //                              Raise if the prior is thin-but-present everywhere and you want more
-    //                              live points; lower toward 1 if you see drift return.
-    "enable_live_mapping": true,
-    "live_map_resolution": 0.5,
-    "live_map_lru_thresh": 75,
-    "live_map_downsampling_rate": 0.5,
-    "live_map_gap_only": true,
-    "live_map_gap_min_points": 10,
-
     // Runtime relocalization (RViz "2D Pose Estimate")
     "enable_relocalization": true,
     "initialpose_topic": "/initialpose",
 
-    // Automatic global-localization bootstrap refinement.
-    // bootstrap_refine               : Fine-register the coarse FPFH+RANSAC pose with VGICP before accepting it.
+    // Automatic global-localization bootstrap.
+    // bootstrap_refine               : Fine-register the coarse FPFH+RANSAC pose with VGICP before
+    //                                  accepting it (the offset must be right from frame one).
     // bootstrap_refine_max_correction: Reject a refinement moving more than this from the coarse pose (m).
-    // bootstrap_max_z_offset         : If >=0, reject a coarse offset with |z| above this and pin z=0 before
-    //                                  refining (use when the LiDAR always starts at the map's recording height).
+    // bootstrap_max_z_offset         : The LiDAR always starts at the height the map was recorded at,
+    //                                  so a coarse offset with |z| above this is a misregistration
+    //                                  (wrong floor/structure) -> rejected; accepted ones get z pinned
+    //                                  to 0 before refinement. Set -1 to disable if that ever changes.
     "bootstrap_refine": true,
     "bootstrap_refine_max_correction": 1.0,
-    "bootstrap_max_z_offset": -1.0,
+    "bootstrap_max_z_offset": 0.3,
+
+    // Publish the saved_map->odom TF so nav can compose the map-frame pose with odom->base.
+    "publish_tf": true,
 
     // Misc
     "validate_imu": true,

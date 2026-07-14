@@ -1,0 +1,57 @@
+services:
+  glim:
+    # Build the glim_p2 + Livox MID360 image. Context is the repo root so the
+    # Dockerfile can COPY the glim source, the sim/publish_tf patch, the Livox
+    # assets (livox/) and the startup wrapper (docker/run_with_livox.sh).
+    build:
+      context: ../..
+      dockerfile: docker/mid360/Dockerfile
+    image: glim_p2_mid360
+    container_name: glim_ros2
+
+    # Network and Permissions. host networking is required so the in-container
+    # Livox driver can reach the MID360 on the host's 192.168.123.x NIC;
+    # privileged is required to raise UDP buffers + set the driver's RT priority.
+    network_mode: host
+    ipc: host
+    pid: host
+    privileged: true
+
+    # GPU Support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    # Environment Variables
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - QT_X11_NO_MITSHM=1
+
+    # Volume Mounts
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Real-sensor GLIM config (points=/livox/lidar, imu=/livox/imu, own odometry).
+      - ./config:/glim/config:ro
+      # Persist GLIM's map dump on the host (written on clean SIGINT shutdown).
+      - ./dump:/tmp/dump
+      - /etc/localtime:/etc/localtime:ro
+
+    # SIGINT so GLIM serializes its map dump on clean shutdown.
+    stop_signal: SIGINT
+    stop_grace_period: 120s
+
+    # Launch the Livox driver, then GLIM. run_with_livox.sh picks mapping vs
+    # localise from ./dump and appends `-p config_path:=...` itself, then forwards
+    # SIGINT to GLIM so the map dump still gets written. Force a mode with
+    # `GLIM_MODE=mapping` / `GLIM_MODE=localize` in `environment:` if needed.
+    command: >
+      run_with_livox.sh
+      ros2 run glim_ros glim_rosnode

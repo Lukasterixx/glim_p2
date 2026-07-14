@@ -23,7 +23,10 @@ IMUPredictionModule::IMUPredictionModule() : logger(create_module_logger("imupre
 
   const Config config_ros(GlobalConfig::get_config_path("config_ros"));
   imu_frame_id = config_ros.param<std::string>("glim_ros", "imu_frame_id", "");
+  base_frame_id = config_ros.param<std::string>("glim_ros", "base_frame_id", "");
   odom_frame_id = config_ros.param<std::string>("glim_ros", "odom_frame_id", "odom");
+  predict_odom_tf = config_ros.param<bool>("glim_ros", "predict_odom_tf", false);
+  tf_time_offset = config_ros.param<double>("glim_ros", "tf_time_offset", 1e-6);
 
   OdometryEstimationCallbacks::on_insert_imu.add(
     [this](const double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) { this->on_insert_imu(stamp, linear_acc, angular_vel); });

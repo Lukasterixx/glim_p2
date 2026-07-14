@@ -1,0 +1,130 @@
+# RViz2 config for verifying IMU-predictor responsiveness against GLIM's odometry.
+#   - PointCloud2  /glim_ros/points          (10 s decay; placed by the usual TF)
+#   - TF                                          (the usual map->odom->base->imu->lidar tree)
+#   - Odometry     /glim_ros/odom            (smoother IMU pose, white axes)
+#   - Odometry     /glim_ros/predicted_odom  (predictor IMU pose, longer/thicker axes)
+# Fixed frame is `odom` so the comparison isolates odometry/predictor tracking and is not
+# perturbed by map->odom relocalization jumps.
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Predicted IMU (predictor)1
+      Splitter Ratio: 0.5
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 40
+      Color: 160; 160; 164
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Points (10s decay)
+      Enabled: true
+      Topic:
+        Value: /glim_ros/points
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Decay Time: 10
+      Style: Flat Squares
+      Size (m): 0.03
+      Alpha: 1
+      Color Transformer: Intensity
+      Channel Name: intensity
+      Autocompute Intensity Bounds: true
+      Invert Rainbow: false
+      Use rainbow: true
+      Position Transformer: XYZ
+      Selectable: true
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Name: TF (usual)
+      Enabled: true
+      Show Names: true
+      Show Axes: true
+      Show Arrows: true
+      Marker Scale: 0.6
+      Frame Timeout: 15
+      Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/Odometry
+      Name: Odom IMU (smoother)
+      Enabled: true
+      Topic:
+        Value: /glim_ros/odom
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Keep: 1
+      Position Tolerance: 0
+      Angle Tolerance: 0
+      Shape: Axes
+      Axes Length: 0.5
+      Axes Radius: 0.05
+      Covariance:
+        Value: false
+      Value: true
+    - Class: rviz_default_plugins/Odometry
+      Name: Predicted IMU (predictor)
+      Enabled: true
+      Topic:
+        Value: /glim_ros/predicted_odom
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+      Keep: 1
+      Position Tolerance: 0
+      Angle Tolerance: 0
+      Shape: Axes
+      Axes Length: 1.0
+      Axes Radius: 0.1
+      Covariance:
+        Value: false
+      Value: true
+  Global Options:
+    Background Color: 25; 25; 30
+    Fixed Frame: odom
+    Frame Rate: 30
+  Enabled: true
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+      Topic:
+        Value: /initialpose
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Distance: 20
+      Pitch: 0.6
+      Yaw: 0.8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Target Frame: <Fixed Frame>
+    Saved: ~
+Window Geometry:
+  Height: 900
+  Width: 1400
+  Displays:
+    collapsed: false
+  Views:
+    collapsed: false

@@ -14,6 +14,10 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 
+namespace tf2_ros {
+class TransformBroadcaster;
+}
+
 namespace glim {
 
 /// @brief A module that predicts the current state of the IMU by integrating the IMU measurements since the last point cloud frame.
@@ -42,12 +46,20 @@ private:
 
   // ROS-related
   std::string imu_frame_id;
+  std::string base_frame_id;
   std::string odom_frame_id;
+
+  // When true, this module broadcasts the odom->base TF at the (high) predictor rate, and the
+  // rviz_viewer suppresses its own odom->base broadcast so the edge has a single owner. Lets
+  // downstream nav consume the responsive predicted pose via TF. Requires base_frame_id == imu_frame_id.
+  bool predict_odom_tf;
+  double tf_time_offset;
 
   double min_publish_interval;
   double last_publish_time;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pred_odom_pub;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pred_pose_pub;
+  std::shared_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster;
 
   // logging
   std::shared_ptr<spdlog::logger> logger;

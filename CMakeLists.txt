@@ -169,7 +169,7 @@ if(DEFINED ENV{ROS_VERSION} AND $ENV{ROS_VERSION} EQUAL 2)
   target_link_libraries(imu_prediction
     glim
   )
-  ament_target_dependencies(imu_prediction rclcpp sensor_msgs nav_msgs geometry_msgs)
+  ament_target_dependencies(imu_prediction rclcpp sensor_msgs nav_msgs geometry_msgs tf2 tf2_ros)
   list(APPEND glim_LIBRARIES imu_prediction)
 
   # External ("sim-mode") odometry frontend (trusts an external odom->lidar TF)

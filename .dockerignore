@@ -4,6 +4,8 @@ docker/*
 # Keep the sim-mode glim_ros2 patch in the build context (see docker/sim/rviz_viewer.cpp)
 !docker/sim
 !docker/sim/rviz_viewer.cpp
+# Keep the Livox+GLIM startup wrapper (see glim_p2_docker/Dockerfile step 7)
+!docker/run_with_livox.sh
 build/*
 install/*
 log/*

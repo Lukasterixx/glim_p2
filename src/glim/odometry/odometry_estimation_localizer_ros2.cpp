@@ -84,7 +84,9 @@ void OdometryEstimationLocalizer::setup_ros() {
   auto logger = this->logger;
 
   // Publish the localization each time the estimator finalizes a new frame. `frame->T_world_imu`
-  // is in the saved-map frame once the bootstrap (or a manual reloc) has been applied.
+  // lives in the estimator's continuous world frame; composing the map offset (T_map_world,
+  // maintained by the bootstrap / initialpose) yields the pose in the saved-map frame. This
+  // callback runs synchronously on the odometry thread, where T_map_world is written.
   OdometryEstimationCallbacks::on_update_new_frame.add(
     [this, offset_pub, localized_odom_pub, tf_buffer, tf_broadcaster, logger, odom_frame_id, imu_frame_id, lidar_frame_id, saved_map_frame_id, publish_tf](
       const EstimationFrame::ConstPtr& frame) {
@@ -95,7 +97,7 @@ void OdometryEstimationLocalizer::setup_ros() {
       // issues from storing a fixed-size Eigen type inside a std::function.
       const Eigen::Isometry3d T_lidar_imu = static_cast<const OdometryEstimationLocalizerParams*>(this->params.get())->T_lidar_imu;
 
-      const Eigen::Isometry3d T_savedmap_imu = frame->T_world_imu;
+      const Eigen::Isometry3d T_savedmap_imu = this->T_map_world * frame->T_world_imu;
       const auto stamp = to_ros_time(frame->stamp);
 
       // Live pose in the saved-map frame.

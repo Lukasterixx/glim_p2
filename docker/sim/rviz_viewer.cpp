@@ -201,11 +201,17 @@ void RvizViewer::odometry_new_frame(const EstimationFrame::ConstPtr& new_frame, 
   // (and imu->lidar) tree to an external source while still publishing
   // map/points/odom topics for visualization. Read once (thread-safe static).
   static const bool publish_tf_cfg = Config(GlobalConfig::get_config_path("config_ros")).param<bool>("glim_ros", "publish_tf", true);
+  // When the IMU-prediction module owns the odom->base edge (predict_odom_tf), skip broadcasting it
+  // here so the transform has a single, high-rate publisher. map->odom and imu->lidar stay with us.
+  static const bool predict_odom_tf = Config(GlobalConfig::get_config_path("config_ros")).param<bool>("glim_ros", "predict_odom_tf", false);
   const bool publish_tf = !corrected && publish_tf_cfg;
   if (publish_tf) {
-    // Odom -> Base
     geometry_msgs::msg::TransformStamped trans;
     trans.header.stamp = tf_stamp;
+
+    // Odom -> Base (skipped when the predictor broadcasts it; only valid to skip when base==imu).
+    const bool suppress_odom_base = predict_odom_tf && (base_frame_id == imu_frame_id);
+    if (!suppress_odom_base) {
     trans.header.frame_id = odom_frame_id;
     trans.child_frame_id = base_frame_id;
 
@@ -243,6 +249,7 @@ void RvizViewer::odometry_new_frame(const EstimationFrame::ConstPtr& new_frame, 
         logger->warn("Failed to lookup transform from {} to {} (stamp={}.{}): {}", imu_frame_id, base_frame_id, stamp.sec, stamp.nanosec, e.what());
       }
     }
+    }  // end !suppress_odom_base
 
     // World -> Odom
     trans.header.frame_id = map_frame_id;

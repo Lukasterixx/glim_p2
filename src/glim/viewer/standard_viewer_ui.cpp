@@ -254,6 +254,18 @@ void StandardViewer::drawable_selection() {
     viewer->set_backface_culling_range(backface_culling_range);
   }
 
+  ImGui::Separator();
+  // Live point size control. point_size is in meters when point_size_metric is set,
+  // otherwise in screen-space pixels, so scale the slider range accordingly.
+  float point_size_f = static_cast<float>(point_size);
+  const float point_size_min = point_size_metric ? 0.001f : 1.0f;
+  const float point_size_max = point_size_metric ? 0.5f : 30.0f;
+  ImGui::SetNextItemWidth(150);
+  if (ImGui::SliderFloat("point_size", &point_size_f, point_size_min, point_size_max, "%.3f", ImGuiSliderFlags_Logarithmic)) {
+    point_size = point_size_f;
+    viewer->shader_setting().set_point_size(point_size);
+  }
+
   ImGui::End();
 
   if (show_odometry_status) {
