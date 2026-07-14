@@ -61,6 +61,8 @@ services:
     stop_signal: SIGINT
     stop_grace_period: 120s
 
-    command: >
-      ros2 run glim_ros glim_rosnode
-      --ros-args -p config_path:=/glim/config
+    # Default: MID360 driver + forked GPU GLIM together (the image CMD). Host
+    # networking reaches the LiDAR at 192.168.123.20 via the dog's Livox NIC.
+    # To run GLIM only (robot's own driver already up), override:
+    #   command: ros2 run glim_ros glim_rosnode --ros-args -p config_path:=/glim/config
+    command: ["bash", "/usr/local/bin/run_glim_livox.sh"]

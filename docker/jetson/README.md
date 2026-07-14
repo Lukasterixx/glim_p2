@@ -4,9 +4,10 @@ Build **this GLIM fork** on the NVIDIA Jetson (Orin, JetPack 6.1) so you can tes
 it on the dog without touching the robot's main container.
 
 This mirrors the GLIM build recipe from P2Dingo's `Dockerfile.jetson` (same base
-image, OpenCV equivs mock, GTSAM 4.3a0 + gtsam_points + Iridescence from source
-with CUDA arch 87, CycloneDDS) but is **scoped to GLIM only** and builds the local
-repo (`COPY .`) instead of cloning `koide3/glim` upstream.
+image, OpenCV equivs mock, GTSAM 4.3a0 + gtsam_points from source with CUDA arch
+87, CycloneDDS, Livox MID360 driver) but builds the local repo (`COPY .`) instead
+of cloning `koide3/glim` upstream. GLIM is built **headless** (no viewer /
+Iridescence), exactly like P2Dingo runs it on the dog.
 
 ## GPU
 
@@ -50,7 +51,18 @@ docker run --rm -it --name glim_p2_test \
   glim_p2_jetson
 ```
 
-The default command runs `glim_rosnode` against `/glim/config`.
+The default command brings up the **MID360 driver + GPU GLIM** together (see below).
+
+## Livox MID360
+
+The container runs the MID360 driver itself (same SDK + driver + `MID360_config.json`
++ driver-only launch as P2Dingo), publishing `/livox/lidar` + `/livox/imu`, then
+starts GLIM against them. The baked config's topics are remapped to those (the repo
+default is Ouster `/os_cloud_node/*`); frames + `acc_scale` stay auto-detected.
+
+The LiDAR IP (`192.168.123.20`) and host NIC (`192.168.123.18`) are baked into the
+`MID360_config.json` heredoc in the Dockerfile — edit + rebuild if yours differ.
+`--net host` gives the container access to that Livox network via the dog's NIC.
 
 ## Config
 
@@ -64,21 +76,23 @@ fork against the **robot-tuned** config, mount the robot's `glim_config` over it
 
 ## How it interoperates on the dog
 
-Runs with `--net host` + CycloneDDS (`ROS_DOMAIN_ID=0`), so it sees the LiDAR/IMU
-topics published by the robot container. To test the fork **in place of** the
-robot's GLIM, stop the robot's `glim_rosnode` first — both use the node name
-`glim_rosnode` and the topic `/glim_rosnode/points`, so running both at once will
-conflict.
+The container runs its **own MID360 driver + GLIM** and shares the host stack
+(`--net host`, CycloneDDS, `ROS_DOMAIN_ID=0`). Run it **standalone** — not at the
+same time as the robot's main container, which runs its own Livox driver and
+`glim_rosnode`. Two would clash on the MID360's UDP ports and on the `glim_rosnode`
+node name. To A/B against the robot's GLIM, stop the robot stack first.
 
 ## Notes
 
 - Requires **BuildKit** (the Docker default on JetPack 6.1) — the Dockerfile uses
   heredocs to stay self-contained. If you build with a legacy builder, run with
   `DOCKER_BUILDKIT=1`.
-- Built with the viewer ON (Iridescence) for config parity with P2Dingo, whose
-  GLIM config loads `libstandard_viewer.so` / `librviz_viewer.so`. If the dog has
-  no display, trim `extension_modules` in your mounted `config_ros.json` to run
-  headless.
+- **Headless** — built with `BUILD_WITH_VIEWER=OFF` (no Iridescence), like P2Dingo
+  on the dog. The baked config loads only `librviz_viewer.so` (RViz markers over the
+  network) + `libimu_prediction.so`; the GL viewer modules aren't built.
+- The fork's `CMakeLists.txt` gates its ROS2 modules on `$ENV{ROS_VERSION} EQUAL 2`,
+  which this base image doesn't export — the Dockerfile pins `ROS_VERSION=2` before
+  `colcon` so that check passes (otherwise cmake errors with "Unknown arguments").
 - On clean shutdown (SIGINT — compose sends this) GLIM serializes its map dump to
   `/tmp/dump`, mounted to `./glim_dump/` on the host.
 - CUDA arch is pinned to `87` (Orin). Change `CMAKE_CUDA_ARCHITECTURES` in the
