@@ -115,9 +115,10 @@ RUN git clone https://github.com/borglab/gtsam ${GTSAM_DIR} && \
     cmake --install . && \
     echo "${GTSAM_PREFIX}/lib" > /etc/ld.so.conf.d/gtsam.conf && ldconfig
 
-# 2. gtsam_points (CUDA)
-RUN git clone https://github.com/koide3/gtsam_points ${GTSAM_POINTS_DIR} && \
-    cd ${GTSAM_POINTS_DIR} && \
+# 2. gtsam_points (CUDA), pinned via the thirdparty/gtsam_points submodule (v1.2.2)
+#    so it can never drift from the version this glim_p2 needs.
+COPY thirdparty/gtsam_points ${GTSAM_POINTS_DIR}
+RUN cd ${GTSAM_POINTS_DIR} && \
     mkdir -p build && cd build && \
     cmake .. \
         -DCMAKE_INSTALL_PREFIX="${GTSAM_PREFIX}" \
@@ -174,17 +175,21 @@ RUN git clone --depth 1 https://github.com/Livox-SDK/Livox-SDK2.git ${LIVOX_SDK_
 # ------------------------------------------------------------------------------
 WORKDIR $WS/src
 
-# glim_ros2 provides the ROS node (glim_rosnode / package glim_ros). Upstream —
-# only the glim core is forked.
-RUN git clone https://github.com/koide3/glim_ros2.git ${WS}/src/glim_ros2
+# glim_ros2 provides the ROS node (glim_rosnode / package glim_ros). VENDORED
+# in-tree at thirdparty/glim_ros2 (upstream commit fc72f46 + the fork's publish_tf
+# rviz_viewer patch — see thirdparty/glim_ros2/VENDORING.md). COPY only that path
+# first so it stays cached across glim-core edits.
+COPY thirdparty/glim_ros2 ${WS}/src/glim_ros2
 # vision_opencv rebuilt from source to fix the OpenCV version conflict against the
 # base image's NVIDIA OpenCV (mirrors P2Dingo).
 RUN git clone -b humble https://github.com/ros-perception/vision_opencv.git $WS/src/vision_opencv
 
 # THE FORK: this repo becomes the `glim` package in the workspace.
-# .dockerignore strips build/ install/ log/ docs/ docker/ from the context, so
-# this copies a clean source tree.
+# .dockerignore strips build/ install/ log/ docs/ docker/ from the context (but
+# keeps thirdparty/), so this copies a clean source tree.
 COPY . $WS/src/glim
+# Drop the nested vendored glim_ros2 so colcon sees only the sibling src/glim_ros2.
+RUN rm -rf $WS/src/glim/thirdparty/glim_ros2
 
 WORKDIR $WS
 RUN source /opt/ros/humble/setup.bash && \

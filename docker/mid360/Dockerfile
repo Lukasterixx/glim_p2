@@ -27,10 +27,12 @@ ARG CUDA_ARCH=89
 #    Iridescence is rebuilt for newer guik/glk APIs used by glim's standard_viewer.
 # ---------------------------------------------------------------------------
 
-# 1a. gtsam_points (CUDA) from latest master -> overwrites the stale 1.2.0 in /usr/local.
-RUN rm -rf /root/gtsam_points && \
-    git clone https://github.com/koide3/gtsam_points /root/gtsam_points && \
-    cd /root/gtsam_points && \
+# 1a. gtsam_points (CUDA), pinned via the thirdparty/gtsam_points submodule
+#     (v1.2.2) -> overwrites the stale 1.2.0 in /usr/local. Vendored so it can
+#     never drift from the version this glim_p2 needs. COPYing only this path keeps
+#     the expensive build cached across glim code edits.
+COPY thirdparty/gtsam_points /root/gtsam_points
+RUN cd /root/gtsam_points && \
     cmake -B build \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/usr/local \
@@ -98,26 +100,21 @@ RUN chmod +x /usr/local/bin/run_with_livox.sh && \
 #    layers; everything above stays cached.
 # ---------------------------------------------------------------------------
 
-# Pin glim_ros2 to the commit the publish_tf rviz_viewer patch was diffed against.
-ARG GLIM_ROS2_COMMIT=fc72f4603ed2d3dffcdf94cda5617963afe57e82
-
-# 3a. Set up glim_ros2 first (independent of glim source, so it stays cached
-#     across glim code edits), then COPY the glim source LAST.
-#     WORKDIR must be a dir the rm below does NOT delete — the base image's
-#     WORKDIR is /root/ros2_ws/src/glim, which we remove here, so pin it to
-#     /root/ros2_ws first (otherwise the shell's CWD vanishes mid-RUN).
+# 3a. glim_ros2 is VENDORED in-tree at thirdparty/glim_ros2 (pinned to upstream
+#     commit fc72f46 + the publish_tf rviz_viewer patch, committed directly — see
+#     thirdparty/glim_ros2/VENDORING.md). COPY only that path first so glim_ros2
+#     stays cached across glim-core edits.
+#     WORKDIR must be a dir the rm below does NOT delete — the base image's WORKDIR
+#     is /root/ros2_ws/src/glim, which we remove here, so pin it to /root/ros2_ws
+#     first (otherwise the shell's CWD vanishes mid-RUN).
 WORKDIR /root/ros2_ws
-RUN rm -rf /root/ros2_ws/src/glim /root/ros2_ws/src/glim_ros2 && \
-    git clone https://github.com/koide3/glim_ros2.git /root/ros2_ws/src/glim_ros2 && \
-    cd /root/ros2_ws/src/glim_ros2 && \
-    git checkout ${GLIM_ROS2_COMMIT}
+RUN rm -rf /root/ros2_ws/src/glim /root/ros2_ws/src/glim_ros2
+COPY thirdparty/glim_ros2 /root/ros2_ws/src/glim_ros2
 
-# Overlay the publish_tf rviz_viewer patch onto glim_ros2 (config_ros.json's
-# publish_tf flag toggles GLIM's own TF broadcast; real-sensor config sets it true).
-COPY docker/sim/rviz_viewer.cpp /root/ros2_ws/src/glim_ros2/src/glim_ros/rviz_viewer.cpp
-
-# The glim source — the layer you actually iterate on.
+# The glim source — the layer you actually iterate on. Drop the nested vendored
+# copy of glim_ros2 so colcon doesn't discover two `glim_ros` packages.
 COPY . /root/ros2_ws/src/glim
+RUN rm -rf /root/ros2_ws/src/glim/thirdparty/glim_ros2
 
 # 3b. Build glim core first, then glim_ros (glim_ros2's package name), so the ROS
 #     node + patched rviz_viewer + libodometry_estimation_external.so land in

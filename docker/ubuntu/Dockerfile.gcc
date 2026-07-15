@@ -32,8 +32,8 @@ RUN add-apt-repository ppa:koide3/iridescence && \
     apt-get update && \
     apt-get install -y libiridescence-dev libgtsam-no-tbb-dev
 
-WORKDIR /root
-RUN git clone https://github.com/koide3/gtsam_points
+# gtsam_points pinned via the thirdparty/gtsam_points submodule (v1.2.2).
+COPY thirdparty/gtsam_points /root/gtsam_points
 WORKDIR /root/gtsam_points/build
 RUN cmake .. \
   -DCMAKE_BUILD_TYPE=Release \

@@ -1,0 +1,3 @@
+[submodule "thirdparty/gtsam_points"]
+	path = thirdparty/gtsam_points
+	url = https://github.com/koide3/gtsam_points
