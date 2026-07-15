@@ -56,6 +56,11 @@
     "vgicp_voxelmap_levels": 2,
     "vgicp_voxelmap_scaling_factor": 2.0,
 
+    // Prior-map visualization: the whole loaded map is sent to the viewer as a static cloud,
+    // voxel-downsampled to this size (m) to bound the GL buffer. Lower = denser map in the
+    // viewer (more VRAM); set <=0 to render every prior-map point.
+    "viz_voxel_resolution": 0.1,
+
     // Runtime relocalization (RViz "2D Pose Estimate")
     "enable_relocalization": true,
     "initialpose_topic": "/initialpose",

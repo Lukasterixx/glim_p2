@@ -69,6 +69,13 @@ public:
   virtual void save(const std::string& path) {}
 
   /**
+   * @brief Load (and continue from) a previously dumped mapping result
+   * @param path  Input dump path
+   * @return      True on success. Default implementation is a no-op returning false.
+   */
+  virtual bool load(const std::string& path) { return false; }
+
+  /**
    * @brief Export all the submap points
    */
   virtual gtsam_points::PointCloud::Ptr export_points() { return nullptr; }

@@ -72,6 +72,13 @@ public:
    */
   void save(const std::string& path);
 
+  /**
+   * @brief Load (and continue from) a previously dumped mapping result
+   * @note  Thread-safe; forwards to the wrapped global-mapping object.
+   * @param path  Input dump path
+   */
+  bool load(const std::string& path);
+
   gtsam_points::PointCloud::Ptr export_points();
 
   std::shared_ptr<glim::GlobalMappingBase> get_global_mapping() {

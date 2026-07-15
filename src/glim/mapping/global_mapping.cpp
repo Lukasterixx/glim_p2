@@ -1,5 +1,6 @@
 #include <glim/mapping/global_mapping.hpp>
 
+#include <cmath>
 #include <map>
 #include <unordered_set>
 #include <spdlog/spdlog.h>
@@ -19,6 +20,7 @@
 #include <gtsam_points/types/point_cloud_gpu.hpp>
 #include <gtsam_points/types/gaussian_voxelmap_cpu.hpp>
 #include <gtsam_points/types/gaussian_voxelmap_gpu.hpp>
+#include <gtsam_points/features/covariance_estimation.hpp>
 #include <gtsam_points/factors/linear_damping_factor.hpp>
 #include <gtsam_points/factors/rotate_vector3_factor.hpp>
 #include <gtsam_points/factors/integrated_gicp_factor.hpp>
@@ -33,6 +35,7 @@
 #include <glim/util/serialization.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/odometry/map_alignment.hpp>
 
 #ifdef GTSAM_USE_TBB
 #include <tbb/task_arena.h>
@@ -75,6 +78,27 @@ GlobalMappingParams::GlobalMappingParams() {
   isam2_relinearize_thresh = config.param<double>("global_mapping", "isam2_relinearize_thresh", 0.1);
 
   init_pose_damping_scale = config.param<double>("global_mapping", "init_pose_damping_scale", 1e10);
+
+  // Session continuation
+  continue_from_map_path = config.param<std::string>("global_mapping", "continue_from_map_path", "");
+  save_map_path = config.param<std::string>("global_mapping", "save_map_path", "");
+  freeze_loaded_map = config.param<bool>("global_mapping", "freeze_loaded_map", true);
+  freeze_prior_precision = config.param<double>("global_mapping", "freeze_prior_precision", 1e10);
+  reloc_voxel_resolution = config.param<double>("global_mapping", "reloc_voxel_resolution", 0.5);
+  reloc_fpfh_radius = config.param<double>("global_mapping", "reloc_fpfh_radius", 2.5);
+  reloc_dof = config.param<int>("global_mapping", "reloc_dof", 4);
+  reloc_search_radius_m = config.param<double>("global_mapping", "reloc_search_radius_m", 1000.0);
+  reloc_start_area_radius_m = config.param<double>("global_mapping", "reloc_start_area_radius_m", 0.0);
+  reloc_min_inlier_rate = config.param<double>("global_mapping", "reloc_min_inlier_rate", 0.3);
+  reloc_registration = config.param<std::string>("global_mapping", "reloc_registration", "RANSAC");
+  num_threads = config.param<int>("global_mapping", "num_threads", 4);
+
+  reloc_method = config.param<std::string>("global_mapping", "reloc_method", "yaw_sweep");
+  reloc_yaw_step_deg = config.param<double>("global_mapping", "reloc_yaw_step_deg", 15.0);
+  reloc_max_submaps = config.param<int>("global_mapping", "reloc_max_submaps", 10);
+  reloc_refine = config.param<bool>("global_mapping", "reloc_refine", true);
+  reloc_refine_max_correction = config.param<double>("global_mapping", "reloc_refine_max_correction", 1.0);
+  reloc_refine_min_inlier_rate = config.param<double>("global_mapping", "reloc_refine_min_inlier_rate", 0.6);
 }
 
 GlobalMappingParams::~GlobalMappingParams() {}
@@ -118,23 +142,405 @@ GlobalMapping::GlobalMapping(const GlobalMappingParams& params) : params(params)
 GlobalMapping::~GlobalMapping() {}
 
 void GlobalMapping::insert_imu(const double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) {
+  ensure_prior_map_loaded();
   Callbacks::on_insert_imu(stamp, linear_acc, angular_vel);
   if (params.enable_imu) {
     imu_integration->insert_imu(stamp, linear_acc, angular_vel);
   }
 }
 
+void GlobalMapping::ensure_prior_map_loaded() {
+  if (prior_map_load_done) {
+    return;
+  }
+  prior_map_load_done = true;  // set first so the callbacks fired by load() cannot re-enter this
+
+  if (params.continue_from_map_path.empty()) {
+    return;
+  }
+
+  logger->info("continuation: loading prior map from {}", params.continue_from_map_path);
+  if (!load(params.continue_from_map_path)) {
+    logger->error("continuation: failed to load prior map from {}; starting a fresh map instead", params.continue_from_map_path);
+    return;
+  }
+
+  // The next submap to arrive becomes the first NEW submap of this session.
+  continuation_start_id = submaps.size();
+
+  // A continuation was attempted: save() redirects to the continuation output folder from here on,
+  // even if we later fall back to fresh mapping (so the fresh map still lands beside the loaded one).
+  continuation_save_redirect = true;
+
+  // Build the FPFH relocalization target.
+  MapAlignerParams ap;
+  ap.voxel_resolution = params.reloc_voxel_resolution;
+  ap.fpfh_radius = params.reloc_fpfh_radius;
+  ap.dof = params.reloc_dof;
+  ap.search_radius_m = params.reloc_search_radius_m;
+  ap.min_inlier_rate = params.reloc_min_inlier_rate;
+  ap.registration = params.reloc_registration;
+  ap.num_threads = params.num_threads;
+
+  // Full concatenated map cloud (map frame). Used for the VGICP target below and, for the FPFH
+  // method, as the source of the coarse-registration features.
+  auto full_map_cloud = MapAligner::load_map_cloud(params.continue_from_map_path, logger);
+
+  // Map-frame VGICP target (two resolution levels), built from the WHOLE map. This is the fine-fit
+  // target for both the yaw-sweep relocalizer and the FPFH refine. It MUST be the whole map, not the
+  // start area: the LiDAR sees tens of metres and the accumulated source spans the retraced route, so
+  // a start-area-only target leaves most source points without a correspondence and makes the inlier
+  // fraction meaningless (it falls as the robot drives away — the bug behind the persistent failures).
+  if (full_map_cloud && (params.reloc_method == "yaw_sweep" || params.reloc_refine)) {
+    auto cov_cloud = gtsam_points::voxelgrid_sampling(full_map_cloud, params.reloc_voxel_resolution * 0.5, params.num_threads);
+    cov_cloud->add_covs(gtsam_points::estimate_covariances(cov_cloud->points, cov_cloud->size(), 10, params.num_threads));
+    reloc_refine_voxelmaps.clear();
+    for (int i = 0; i < 2; i++) {
+      const double resolution = params.reloc_voxel_resolution * std::pow(2.0, i);
+      auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
+      voxelmap->insert(*cov_cloud);
+      reloc_refine_voxelmaps.push_back(voxelmap);
+    }
+    logger->info("continuation: VGICP relocalization target ready ({} map points, {} levels)", cov_cloud->size(), reloc_refine_voxelmaps.size());
+  }
+
+  // FPFH coarse-registration target (only for the "fpfh" method). If a start-area radius is set, build
+  // it from ONLY the map points near the START of the prior run to remove whole-map self-similarity
+  // that dilutes FPFH correspondences; otherwise use the whole map.
+  if (params.reloc_method == "fpfh") {
+    std::shared_ptr<gtsam_points::PointCloudCPU> fpfh_cloud;
+    if (params.reloc_start_area_radius_m > 0.0 && !submaps.empty() && submaps.front()->frame) {
+      const Eigen::Vector3d start = submaps.front()->T_world_origin.translation();
+      const double r2 = params.reloc_start_area_radius_m * params.reloc_start_area_radius_m;
+      std::vector<Eigen::Vector4d> pts;
+      for (const auto& sm : submaps) {
+        if (!sm->frame) {
+          continue;
+        }
+        const Eigen::Matrix4d T = sm->T_world_origin.matrix();
+        for (size_t i = 0; i < sm->frame->size(); i++) {
+          const Eigen::Vector4d p = T * sm->frame->points[i];
+          if ((p.head<3>() - start).squaredNorm() <= r2) {
+            pts.push_back(p);
+          }
+        }
+      }
+      if (pts.size() >= 100) {
+        fpfh_cloud = std::make_shared<gtsam_points::PointCloudCPU>(pts);
+        logger->info("continuation: FPFH target limited to the start area (r={:.1f} m): {} points", params.reloc_start_area_radius_m, pts.size());
+      }
+    }
+    if (!fpfh_cloud) {
+      fpfh_cloud = full_map_cloud;
+    }
+    if (fpfh_cloud) {
+      aligner = std::make_shared<MapAligner>(fpfh_cloud, ap, logger);
+    }
+  }
+
+  // Relocalization is ready when its target exists: the VGICP voxelmaps for "yaw_sweep", or a valid
+  // FPFH aligner for "fpfh".
+  const bool reloc_ready = (params.reloc_method == "yaw_sweep") ? !reloc_refine_voxelmaps.empty() : (aligner && aligner->valid());
+  if (reloc_ready) {
+    continuation_mode = true;
+    logger->info("continuation: {} prior submaps loaded; the new session will be relocalized onto them (method={})", continuation_start_id, params.reloc_method);
+  } else {
+    logger->error("continuation: failed to build the relocalization target (method={}); the loaded map will not be extended with the new session", params.reloc_method);
+  }
+}
+
+void GlobalMapping::try_relocalize_pending() {
+  // Accumulate ALL pending submaps into one odom-frame cloud. The submaps are mutually consistent
+  // through odometry, so a moving start just grows the source geometry with every retry.
+  std::vector<Eigen::Vector4d> src;
+  for (const auto& sm : pending_submaps) {
+    if (!sm->frame || sm->frame->size() == 0) {
+      continue;
+    }
+    const Eigen::Matrix4d T = sm->T_world_origin.matrix();
+    const auto* pts = sm->frame->points;
+    const size_t n = sm->frame->size();
+    const size_t stride = std::max<size_t>(1, n / 40000);  // bound the source on dense submaps
+    src.reserve(src.size() + n / stride + 1);
+    for (size_t i = 0; i < n; i += stride) {
+      src.emplace_back(T * pts[i]);
+    }
+  }
+  if (src.empty()) {
+    logger->warn("continuation: pending submaps hold no points yet; retrying with the next submap");
+    return;
+  }
+
+  const int attempt = pending_submaps.size();
+  bool ok = false;
+  double coarse_inlier = -1.0;                       // FPFH-only diagnostic
+  Eigen::Isometry3d correction = Eigen::Isometry3d::Identity();
+
+  if (params.reloc_method == "yaw_sweep") {
+    if (reloc_refine_voxelmaps.empty()) {
+      logger->error("continuation: no VGICP relocalization target; placing the new session at identity offset");
+      reloc_abandoned = true;
+      return;
+    }
+    ok = relocalize_yaw_sweep(src, correction);
+  } else {  // "fpfh"
+    if (!aligner || !aligner->valid()) {
+      logger->error("continuation: no FPFH relocalization target; placing the new session at identity offset");
+      reloc_abandoned = true;
+      return;
+    }
+    MapAlignerParams ap;
+    ap.voxel_resolution = params.reloc_voxel_resolution;
+    ap.fpfh_radius = params.reloc_fpfh_radius;
+    ap.dof = params.reloc_dof;
+    ap.search_radius_m = params.reloc_search_radius_m;
+    ap.min_inlier_rate = params.reloc_min_inlier_rate;
+    ap.registration = params.reloc_registration;
+    ap.num_threads = params.num_threads;
+
+    const auto result = aligner->align(src, ap);
+    coarse_inlier = result.inlier_rate;
+    ok = result.success;
+    correction = result.T_target_source;
+    if (ok && params.reloc_refine) {
+      ok = refine_relocalization(src, correction);
+    }
+  }
+
+  if (ok) {
+    T_map_odom = correction;
+    T_map_odom.linear() = Eigen::Quaterniond(T_map_odom.linear()).normalized().toRotationMatrix();
+    relocalized = true;
+    const Eigen::Vector3d t = T_map_odom.translation();
+    const double yaw = std::atan2(T_map_odom.linear()(1, 0), T_map_odom.linear()(0, 0));
+    logger->info(
+      "continuation: relocalized the new session onto the prior map (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg",
+      params.reloc_method,
+      attempt,
+      t.x(),
+      t.y(),
+      t.z(),
+      yaw * 180.0 / M_PI);
+    GlobalMappingCallbacks::on_relocalized(T_map_odom);
+    return;
+  }
+
+  if (attempt >= params.reloc_max_submaps) {
+    reloc_abandoned = true;  // consumed by the fresh-mapping fallback in insert_submap
+    logger->error("continuation: relocalization abandoned after {} attempts", attempt);
+  } else if (params.reloc_method == "fpfh") {
+    logger->warn(
+      "continuation: relocalization attempt {}/{} failed (coarse inlier_rate={:.2f}); buffering submaps and retrying with more geometry",
+      attempt,
+      params.reloc_max_submaps,
+      coarse_inlier);
+  } else {
+    logger->warn("continuation: relocalization attempt {}/{} failed; buffering submaps and retrying with more geometry", attempt, params.reloc_max_submaps);
+  }
+}
+
+std::pair<Eigen::Isometry3d, double>
+GlobalMapping::vgicp_fit(const std::shared_ptr<gtsam_points::PointCloudCPU>& src, const Eigen::Isometry3d& T_init, int max_iterations) const {
+  gtsam::Values values;
+  values.insert(gtsam::Key(0), gtsam::Pose3(T_init.matrix()));
+
+  gtsam::NonlinearFactorGraph graph;
+  std::vector<const gtsam_points::IntegratedVGICPFactor*> factors;  // owned by `graph`
+  for (const auto& voxelmap : reloc_refine_voxelmaps) {
+    auto f = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(gtsam::Pose3(), gtsam::Key(0), voxelmap, src);
+    f->set_num_threads(params.num_threads);
+    graph.add(f);
+    factors.push_back(f.get());
+  }
+
+  gtsam_points::LevenbergMarquardtExtParams lm_params;
+  lm_params.setMaxIterations(max_iterations);
+  lm_params.setAbsoluteErrorTol(1e-3);
+  gtsam_points::LevenbergMarquardtOptimizerExt optimizer(graph, values, lm_params);
+  values = optimizer.optimize();
+
+  const Eigen::Isometry3d refined(values.at<gtsam::Pose3>(gtsam::Key(0)).matrix());
+  const double inlier_rate = factors.empty() ? 0.0 : factors.front()->inlier_fraction();
+  return {refined, inlier_rate};
+}
+
+bool GlobalMapping::relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& out_T) {
+  if (reloc_refine_voxelmaps.empty() || submaps.empty() || pending_submaps.empty()) {
+    return false;
+  }
+
+  auto src = std::make_shared<gtsam_points::PointCloudCPU>(src_points);
+  auto ds = gtsam_points::voxelgrid_sampling(src, params.reloc_voxel_resolution, params.num_threads);
+  if (!ds || ds->size() < 100) {
+    return false;
+  }
+  ds->add_covs(gtsam_points::estimate_covariances(ds->points, ds->size(), 10, params.num_threads));
+
+  // Anchor: the first new submap sits at (roughly) the same physical place as the map's first submap
+  // (same start, same route), so base = M0 * P0^-1 maps the new-session odom frame onto the map with
+  // matched headings. The reboot heading is unknown, so we twist the anchor by a global yaw about M0's
+  // position and let VGICP settle each hypothesis; the best-inlier fit that lands within the spawn
+  // radius wins.
+  const Eigen::Isometry3d M0 = submaps.front()->T_world_origin;
+  const Eigen::Isometry3d P0 = pending_submaps.front()->T_world_origin;
+  const Eigen::Isometry3d base = M0 * P0.inverse();
+  const Eigen::Vector3d c = M0.translation();
+
+  const double step = std::max(1.0, params.reloc_yaw_step_deg);
+  const int num_hyp = static_cast<int>(std::ceil(360.0 / step));
+
+  double best_inlier = -1.0;
+  Eigen::Isometry3d best_T = Eigen::Isometry3d::Identity();
+  for (int k = 0; k < num_hyp; k++) {
+    const double theta = k * step * M_PI / 180.0;
+    Eigen::Isometry3d twist = Eigen::Isometry3d::Identity();
+    twist.linear() = Eigen::AngleAxisd(theta, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    twist.translation() = c - twist.linear() * c;  // yaw about the anchor point c
+    const Eigen::Isometry3d T_init = twist * base;
+
+    const auto [T_ref, inlier] = vgicp_fit(ds, T_init, 20);
+
+    // Sanity gate: the first new submap must land within the spawn radius of the map's first submap.
+    const Eigen::Vector3d landed = (T_ref * P0).translation();
+    if ((landed - c).norm() > params.reloc_search_radius_m) {
+      continue;
+    }
+    if (inlier > best_inlier) {
+      best_inlier = inlier;
+      best_T = T_ref;
+    }
+  }
+
+  logger->info("continuation: yaw-sweep best inlier_rate={:.2f} over {} hypotheses (gate {:.2f})", best_inlier, num_hyp, params.reloc_refine_min_inlier_rate);
+  if (best_inlier < params.reloc_refine_min_inlier_rate) {
+    return false;
+  }
+  out_T = best_T;
+  return true;
+}
+
+bool GlobalMapping::refine_relocalization(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& T_map_odom_coarse) {
+  if (reloc_refine_voxelmaps.empty()) {
+    logger->warn("continuation: refine skipped (no refine voxelmaps)");
+    return true;
+  }
+
+  auto src = std::make_shared<gtsam_points::PointCloudCPU>(src_points);
+  auto downsampled = gtsam_points::voxelgrid_sampling(src, params.reloc_voxel_resolution, params.num_threads);
+  if (!downsampled || downsampled->size() < 100) {
+    logger->warn("continuation: refine rejected (accumulated cloud too small after downsampling)");
+    return false;
+  }
+  downsampled->add_covs(gtsam_points::estimate_covariances(downsampled->points, downsampled->size(), 10, params.num_threads));
+
+  // VGICP-fit the source (odom frame) to the full-map voxelmaps from the coarse FPFH pose.
+  const auto [refined, inlier_rate] = vgicp_fit(downsampled, T_map_odom_coarse, 30);
+  const Eigen::Isometry3d delta = T_map_odom_coarse.inverse() * refined;
+  const double delta_t = delta.translation().norm();
+  const double delta_r = Eigen::AngleAxisd(delta.linear()).angle();
+
+  logger->info("continuation: refine moved {:.2f}m / {:.1f}deg from the coarse pose, inlier_rate={:.2f}", delta_t, delta_r * 180.0 / M_PI, inlier_rate);
+
+  if (delta_t > params.reloc_refine_max_correction || delta_r > 15.0 * M_PI / 180.0) {
+    logger->warn("continuation: refine rejected (correction exceeds the trust gate: {:.2f}m / {:.1f}deg)", delta_t, delta_r * 180.0 / M_PI);
+    return false;
+  }
+  if (inlier_rate < params.reloc_refine_min_inlier_rate) {
+    logger->warn("continuation: refine rejected (inlier rate {:.2f} below gate {:.2f})", inlier_rate, params.reloc_refine_min_inlier_rate);
+    return false;
+  }
+
+  T_map_odom_coarse = refined;
+  return true;
+}
+
 void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
+  ensure_prior_map_loaded();
+
+  // Continuation: buffer new submaps (out of the graph) until relocalization resolves, retrying
+  // with the accumulated cloud each time one arrives. On success (or after giving up) the buffer
+  // is flushed in order: the first pending submap gets the absolute (relocalized) placement, the
+  // rest chain through odometry as usual. The IMU queue is untouched while buffering, so the
+  // IMU factors between the flushed submaps are still created normally.
+  if (continuation_mode && !relocalized && !reloc_abandoned) {
+    pending_submaps.push_back(submap);
+    try_relocalize_pending();
+    if (reloc_abandoned) {
+      // Could not align to the loaded map: fall back to fresh mapping, then flush the buffered
+      // submaps as the fresh session's first submaps.
+      reset_to_fresh_mapping();
+    }
+    if (relocalized || !continuation_mode) {
+      std::vector<SubMap::Ptr> to_flush;
+      to_flush.swap(pending_submaps);
+      for (const auto& pending : to_flush) {
+        insert_submap_internal(pending);
+      }
+    }
+    return;
+  }
+
+  insert_submap_internal(submap);
+}
+
+void GlobalMapping::reset_to_fresh_mapping() {
+  logger->error("========================================================================");
+  logger->error("continuation: RELOCALIZATION FAILED — could not align the new session to the loaded map.");
+  logger->error("continuation: falling back to FRESH MAPPING. The loaded prior map is discarded for this run");
+  logger->error("continuation: (the original on disk is untouched); a brand-new map is built and saved into the");
+  logger->error("continuation: continuation output folder on shutdown.");
+  logger->error("========================================================================");
+
+  // Drop the loaded map from the active graph and start over with an empty optimizer.
+  submaps.clear();
+  subsampled_submaps.clear();
+  new_values.reset(new gtsam::Values);
+  new_factors.reset(new gtsam::NonlinearFactorGraph);
+
+  gtsam::ISAM2Params isam2_params;
+  if (params.use_isam2_dogleg) {
+    gtsam::ISAM2DoglegParams dogleg_params;
+    isam2_params.setOptimizationParams(dogleg_params);
+  }
+  isam2_params.relinearizeSkip = params.isam2_relinearize_skip;
+  isam2_params.setRelinearizeThreshold(params.isam2_relinearize_thresh);
+  if (params.enable_optimization) {
+    isam2.reset(new gtsam_points::ISAM2Ext(isam2_params));
+  } else {
+    isam2.reset(new gtsam_points::ISAM2ExtDummy(isam2_params));
+  }
+
+  // Continuation is over for graph purposes; subsequent submaps insert as a normal fresh session
+  // (first = X(0) with a damping anchor, the rest chain). continuation_save_redirect stays true so
+  // the fresh map is still written into the continuation output folder.
+  continuation_mode = false;
+  relocalized = false;
+  reloc_abandoned = false;
+  continuation_start_id = -1;
+  reloc_refine_voxelmaps.clear();
+  aligner.reset();
+}
+
+void GlobalMapping::insert_submap_internal(const SubMap::Ptr& submap) {
   logger->debug("insert_submap id={} |frame|={}", submap->id, submap->frame->size());
 
   const int current = submaps.size();
   const int last = current - 1;
+
+  // First submap of a new session appended onto a loaded prior map: there is no continuous
+  // odometry across the GLIM restart, so it gets the absolute relocalized placement (T_map_odom)
+  // instead of chaining from the (loaded) previous submap.
+  const bool session_start = continuation_mode && current == continuation_start_id;
+
   insert_submap(current, submap);
 
   gtsam::Pose3 current_T_world_submap = gtsam::Pose3::Identity();
   gtsam::Pose3 last_T_world_submap = gtsam::Pose3::Identity();
 
-  if (current != 0) {
+  if (session_start) {
+    // Absolute placement via relocalization; the prior-map matching-cost factors below tie it in.
+    current_T_world_submap = gtsam::Pose3((T_map_odom * submap->T_world_origin).matrix());
+  } else if (current != 0) {
     if (isam2->valueExists(X(last))) {
       last_T_world_submap = isam2->calculateEstimate<gtsam::Pose3>(X(last));
     } else {
@@ -160,6 +566,14 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
 
   if (current == 0) {
     new_factors->emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, params.init_pose_damping_scale);
+  } else if (session_start) {
+    // No between-factor across the restart gap (the odometry chain is broken). Connect to the prior
+    // map purely via spatial overlap. If relocalization failed the submap is a free-floating gauge,
+    // so anchor it with a damping prior to keep the optimization well-posed.
+    new_factors->add(*create_matching_cost_factors(current));
+    if (!relocalized) {
+      new_factors->emplace_shared<gtsam_points::LinearDampingFactor>(X(current), 6, params.init_pose_damping_scale);
+    }
   } else {
     new_factors->add(*create_between_factors(current));
     new_factors->add(*create_matching_cost_factors(current));
@@ -181,7 +595,10 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
     const auto prior_noise3 = gtsam::noiseModel::Isotropic::Precision(3, 1e6);
     const auto prior_noise6 = gtsam::noiseModel::Isotropic::Precision(6, 1e6);
 
-    if (current > 0) {
+    // At a session start (first new submap onto a loaded map) there is no IMU data spanning the
+    // restart gap and no continuous L-endpoint from the previous (loaded) session, so treat it like
+    // the very first submap: only the R endpoint is created and no cross-boundary ImuFactor is added.
+    if (current > 0 && !session_start) {
       new_values->insert(E(current * 2), gtsam::Pose3((submap->T_world_origin * submap->T_origin_endpoint_L).matrix()));
       new_values->insert(V(current * 2), (submap->T_world_origin.linear() * v_origin_imuL).eval());
       new_values->insert(B(current * 2), imu_biasL);
@@ -200,7 +617,7 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
     new_factors->emplace_shared<gtsam_points::RotateVector3Factor>(X(current), V(current * 2 + 1), v_origin_imuR, prior_noise3);
     new_factors->emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(B(current * 2 + 1), imu_biasR, prior_noise6);
 
-    if (current != 0) {
+    if (current != 0 && !session_start) {
       const double stampL = submaps[last]->frames.back()->stamp;
       const double stampR = submaps[current]->frames.front()->stamp;
 
@@ -544,9 +961,49 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearF
 }
 
 void GlobalMapping::save(const std::string& path) {
+  namespace fs = boost::filesystem;
+
+  // A run can end while submaps are still buffered awaiting relocalization; flush them with the
+  // current (best-effort) placement rather than silently dropping them from the saved map.
+  if (!pending_submaps.empty()) {
+    logger->warn("continuation: {} submaps still buffered awaiting relocalization at save; flushing with the current placement", pending_submaps.size());
+    reloc_abandoned = true;
+    for (const auto& pending : pending_submaps) {
+      insert_submap_internal(pending);
+    }
+    pending_submaps.clear();
+  }
+
+  // In continuation mode the loaded prior map must never be clobbered: grow it into a distinct
+  // sibling folder. Precedence: explicit save_map_path > requested path (if it does not resolve to
+  // the loaded map) > "<loaded>_continued".
+  std::string out_path = path;
+  if (continuation_save_redirect && !params.continue_from_map_path.empty()) {
+    boost::system::error_code ec;
+    const auto same_dir = [&](const std::string& a, const std::string& b) {
+      return fs::exists(a, ec) && fs::exists(b, ec) && fs::equivalent(a, b, ec);
+    };
+
+    if (!params.save_map_path.empty()) {
+      out_path = params.save_map_path;
+    } else if (path.empty() || same_dir(path, params.continue_from_map_path)) {
+      out_path = params.continue_from_map_path;
+      while (!out_path.empty() && (out_path.back() == '/' || out_path.back() == '\\')) {
+        out_path.pop_back();
+      }
+      out_path += "_continued";
+    }
+
+    if (same_dir(out_path, params.continue_from_map_path)) {
+      logger->error("continuation: refusing to overwrite the loaded prior map at {}; aborting save", params.continue_from_map_path);
+      return;
+    }
+    logger->info("continuation: saving the grown map to {} (loaded prior map at {} left untouched)", out_path, params.continue_from_map_path);
+  }
+
   optimize();
 
-  boost::filesystem::create_directories(path);
+  fs::create_directories(out_path);
 
   gtsam::NonlinearFactorGraph serializable_factors;
   std::unordered_map<std::string, gtsam::NonlinearFactor::shared_ptr> matching_cost_factors;
@@ -569,11 +1026,11 @@ void GlobalMapping::save(const std::string& path) {
     }
   }
 
-  logger->info("serializing factor graph to {}/graph.bin", path);
-  serializeToBinaryFile(serializable_factors, path + "/graph.bin");
-  serializeToBinaryFile(isam2->calculateEstimate(), path + "/values.bin");
+  logger->info("serializing factor graph to {}/graph.bin", out_path);
+  serializeToBinaryFile(serializable_factors, out_path + "/graph.bin");
+  serializeToBinaryFile(isam2->calculateEstimate(), out_path + "/values.bin");
 
-  std::ofstream ofs(path + "/graph.txt");
+  std::ofstream ofs(out_path + "/graph.txt");
   ofs << "num_submaps: " << submaps.size() << std::endl;
   ofs << "num_all_frames: " << std::accumulate(submaps.begin(), submaps.end(), 0, [](int sum, const SubMap::ConstPtr& submap) { return sum + submap->frames.size(); }) << std::endl;
 
@@ -597,11 +1054,11 @@ void GlobalMapping::save(const std::string& path) {
     ofs << "matching_cost " << type << " " << symbol0.index() << " " << symbol1.index() << std::endl;
   }
 
-  std::ofstream odom_lidar_ofs(path + "/odom_lidar.txt");
-  std::ofstream traj_lidar_ofs(path + "/traj_lidar.txt");
+  std::ofstream odom_lidar_ofs(out_path + "/odom_lidar.txt");
+  std::ofstream traj_lidar_ofs(out_path + "/traj_lidar.txt");
 
-  std::ofstream odom_imu_ofs(path + "/odom_imu.txt");
-  std::ofstream traj_imu_ofs(path + "/traj_imu.txt");
+  std::ofstream odom_imu_ofs(out_path + "/odom_imu.txt");
+  std::ofstream traj_imu_ofs(out_path + "/traj_imu.txt");
 
   const auto write_tum_frame = [](std::ofstream& ofs, const double stamp, const Eigen::Isometry3d& pose) {
     const Eigen::Quaterniond quat(pose.linear());
@@ -627,11 +1084,11 @@ void GlobalMapping::save(const std::string& path) {
       write_tum_frame(traj_lidar_ofs, frame->stamp, T_world_lidar);
     }
 
-    submaps[i]->save((boost::format("%s/%06d") % path % i).str());
+    submaps[i]->save((boost::format("%s/%06d") % out_path % i).str());
   }
 
   logger->info("saving config");
-  GlobalConfig::instance()->dump(path + "/config");
+  GlobalConfig::instance()->dump(out_path + "/config");
 }
 
 
@@ -870,6 +1327,24 @@ bool GlobalMapping::load(const std::string& path) {
     } else {
       logger->warn("unsupported matching cost factor type ({})", type);
     }
+  }
+
+  // Pin the loaded submaps to their saved poses so the certified prior map stays put and acts as
+  // drift-free truth (new-session submaps register against it rather than dragging it around). We
+  // stripped the map's own damping/translation/pose priors above (they encode the old gauge); here we
+  // re-anchor each loaded submap to the pose it was saved at with a strong 6-DOF prior.
+  if (start_from_frame_id > 0 && params.freeze_loaded_map) {
+    const auto freeze_noise = gtsam::noiseModel::Isotropic::Precision(6, params.freeze_prior_precision);
+    int num_pinned = 0;
+    for (int i = 0; i < num_submaps; i++) {
+      const gtsam::Key key = X(i + start_from_frame_id);
+      if (!values.exists(key)) {
+        continue;
+      }
+      graph.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(key, values.at<gtsam::Pose3>(key), freeze_noise);
+      num_pinned++;
+    }
+    logger->info("continuation: pinned {} loaded submaps to their saved poses (precision {:.0e}) -> prior map is frozen truth", num_pinned, params.freeze_prior_precision);
   }
 
   const size_t num_factors_before = graph.size();

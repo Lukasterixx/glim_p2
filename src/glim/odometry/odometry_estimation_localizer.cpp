@@ -59,6 +59,8 @@ OdometryEstimationLocalizerParams::OdometryEstimationLocalizerParams() {
   vgicp_voxelmap_levels = config.param<int>("odometry_estimation", "vgicp_voxelmap_levels", 2);
   vgicp_voxelmap_scaling_factor = config.param<double>("odometry_estimation", "vgicp_voxelmap_scaling_factor", 2.0);
 
+  viz_voxel_resolution = config.param<double>("odometry_estimation", "viz_voxel_resolution", 0.1);
+
   enable_live_mapping = config.param<bool>("odometry_estimation", "enable_live_mapping", true);
   live_map_resolution = config.param<double>("odometry_estimation", "live_map_resolution", vgicp_resolution);
   live_map_lru_thresh = config.param<int>("odometry_estimation", "live_map_lru_thresh", 75);
@@ -236,9 +238,9 @@ void OdometryEstimationLocalizer::load_prior_map(const std::string& path) {
 #endif
     }
 
-    if (localizer_params->auto_bootstrap) {
-      map_points_all.insert(map_points_all.end(), transformed->points, transformed->points + transformed->size());
-    }
+    // Keep the full world-frame cloud: it feeds the FPFH bootstrap target (auto_bootstrap)
+    // and the dense prior-map visualization (always).
+    map_points_all.insert(map_points_all.end(), transformed->points, transformed->points + transformed->size());
 
     total_points += transformed->size();
     num_submaps++;
@@ -261,11 +263,15 @@ void OdometryEstimationLocalizer::load_prior_map(const std::string& path) {
     build_bootstrap_target(std::make_shared<gtsam_points::PointCloudCPU>(map_points_all));
   }
 
-  // Keep the coarsest-level voxel centroids (in map coordinates) as a pseudo-keyframe; it is
-  // published posed at T_map_world^-1 so viewers render the prior map aligned with the estimator
-  // frame both before and after the offset is defined.
-  auto viz_source = target_voxelmaps.empty() ? nullptr : target_voxelmaps.back();
-  if (viz_source) {
+  // Keep the FULL prior map (in map coordinates) as a pseudo-keyframe so viewers render the whole
+  // map, not just a sparse voxel level. It is published posed at T_map_world^-1 so it stays aligned
+  // with the estimator frame both before and after the offset is defined. Voxel-downsample to
+  // viz_voxel_resolution to bound the GL buffer (<=0 keeps every point).
+  gtsam_points::PointCloudCPU::Ptr viz_cloud = std::make_shared<gtsam_points::PointCloudCPU>(map_points_all);
+  if (localizer_params->viz_voxel_resolution > 0.0) {
+    viz_cloud = gtsam_points::voxelgrid_sampling(viz_cloud, localizer_params->viz_voxel_resolution, localizer_params->num_threads);
+  }
+  if (viz_cloud && viz_cloud->size() > 0) {
     EstimationFrame::Ptr frame(new EstimationFrame);
     frame->id = -1;
     frame->stamp = 0.0;
@@ -275,9 +281,10 @@ void OdometryEstimationLocalizer::load_prior_map(const std::string& path) {
     frame->v_world_imu.setZero();
     frame->imu_bias.setZero();
     frame->frame_id = FrameID::WORLD;
-    frame->frame = std::make_shared<gtsam_points::PointCloudCPU>(viz_source->voxel_points());
+    frame->frame = viz_cloud;
     prior_map_frame = frame;
 
+    logger->info("prior-map viz: {} points (voxel {:.2f}m) from {} raw", viz_cloud->size(), localizer_params->viz_voxel_resolution, total_points);
     publish_prior_map_viz();
   }
 }

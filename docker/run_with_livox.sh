@@ -74,8 +74,9 @@ else
 fi
 
 # --- GLIM mode selection -----------------------------------------------------
-# auto (default): if the prior-map dump already holds a saved map, localise
-# within it; otherwise map fresh. Override with GLIM_MODE=mapping|localize.
+# auto (default): if the prior-map dump already holds a saved map, CONTINUE onto
+# it (load it and keep mapping, closing loops against it); otherwise map fresh.
+# Override with GLIM_MODE=mapping|localize (localize == continue).
 GLIM_CONFIG_SRC="${GLIM_CONFIG_SRC:-/glim/config}"
 PRIOR_MAP_DIR="${PRIOR_MAP_DIR:-/tmp/dump}"
 GLIM_MODE="${GLIM_MODE:-auto}"
@@ -97,19 +98,16 @@ rm -rf "$GLIM_CONFIG_ACTIVE"
 cp -r "$GLIM_CONFIG_SRC" "$GLIM_CONFIG_ACTIVE"
 
 if [ "$GLIM_MODE" = "localize" ]; then
-  echo "[container] Prior map found in $PRIOR_MAP_DIR -> LOCALISE mode (no new map is built)."
-  # Odometry localises against the fixed prior map; sub/global mapping are turned
-  # off so the prior dump is never overwritten while localizing.
-  sed -i -E 's#("config_odometry"[[:space:]]*:[[:space:]]*)"[^"]*"#\1"config_odometry_localizer.json"#' \
-    "$GLIM_CONFIG_ACTIVE/config.json"
-  sed -i -E 's#("config_sub_mapping"[[:space:]]*:[[:space:]]*)"[^"]*"#\1"config_sub_mapping_passthrough.json"#' \
-    "$GLIM_CONFIG_ACTIVE/config.json"
-  sed -i -E 's#("enable_global_mapping"[[:space:]]*:[[:space:]]*)true#\1false#' \
-    "$GLIM_CONFIG_ACTIVE/config_ros.json"
-  # Keep the localizer's prior_map_path in sync with the mounted dump dir.
-  sed -i -E "s#(\"prior_map_path\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"#\1\"$PRIOR_MAP_DIR\"#" \
-    "$GLIM_CONFIG_ACTIVE/config_odometry_localizer.json"
-  echo "[container] Send an RViz '2D Pose Estimate' (/initialpose) to set the start pose."
+  echo "[container] Prior map found in $PRIOR_MAP_DIR -> CONTINUE mode (loading it and mapping onto it, as if GLIM was never turned off)."
+  # Keep the normal mapping pipeline (odometry + sub + global mapping all on), but load the prior
+  # dump and continue onto it: the loaded submaps come back as optimizable variables, the new session
+  # relocalizes onto them (FPFH+RANSAC on the first new submap), and overlap-based loop closure locks
+  # old and new poses together. The prior map is NEVER overwritten; the grown map is written to
+  # $PRIOR_MAP_DIR/continued (kept under the mounted dump dir so it persists on the host).
+  sed -i -E "s#(\"continue_from_map_path\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"#\1\"$PRIOR_MAP_DIR\"#" \
+    "$GLIM_CONFIG_ACTIVE/config_global_mapping_gpu.json"
+  sed -i -E "s#(\"save_map_path\"[[:space:]]*:[[:space:]]*)\"[^\"]*\"#\1\"$PRIOR_MAP_DIR/continued\"#" \
+    "$GLIM_CONFIG_ACTIVE/config_global_mapping_gpu.json"
 else
   echo "[container] No prior map in $PRIOR_MAP_DIR -> MAPPING mode (map saved to $PRIOR_MAP_DIR on shutdown)."
 fi

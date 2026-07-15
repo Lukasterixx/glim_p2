@@ -46,6 +46,48 @@
     // Optimizer settings
     "use_isam2_dogleg": false,
     "isam2_relinearize_skip": 1,
-    "isam2_relinearize_thresh": 0.1
+    "isam2_relinearize_thresh": 0.1,
+    // --- Session continuation ("as if GLIM was never turned off") ---
+    // Set continue_from_map_path to a prior dump to load it and keep mapping onto it (loop closures
+    // lock old+new poses). save_map_path MUST stay under the mounted /tmp/dump to persist on the host
+    // (a sibling like /tmp/dump_continued is NOT mounted and would be lost on container removal).
+    // Empty continue_from_map_path = normal fresh mapping.
+    // reloc_method: "yaw_sweep" (default) exploits the near-start prior directly — anchor the first new
+    //   submap onto the map's first submap, sweep yaw hypotheses (reloc_yaw_step_deg), VGICP-refine each
+    //   against the WHOLE map, keep the best. No FPFH fragility. "fpfh" = global FPFH coarse + VGICP refine
+    //   (uses reloc_start_area_radius_m / reloc_fpfh_radius / reloc_registration).
+    // reloc_start_area_radius_m: (FPFH method only) build the FPFH target from ONLY the map points within this
+    //   radius of the map START (submap 0), and reloc_search_radius_m is the spawn radius (reject a
+    //   fix that lands further than this from the start). Use when the robot always reboots within a
+    //   metre or two of where the prior run began (any yaw). Set radius=0 for whole-map global search.
+    // Robustness: new submaps are buffered (out of the graph) and relocalization retries with the
+    //   ACCUMULATED cloud until it passes, up to reloc_max_submaps attempts. Each coarse FPFH fix is
+    //   VGICP-fine-refined and gated on reloc_refine_max_correction / reloc_refine_min_inlier_rate
+    //   (the trustworthy gate; the coarse reloc_min_inlier_rate can stay loose).
+    // freeze_loaded_map: when true (default) every loaded submap is pinned to its saved pose with a
+    //   strong prior, so the certified prior map stays put and acts as drift-free truth -- new-session
+    //   submaps register AGAINST it (live pose corrected toward the fixed map) instead of the map
+    //   drifting to co-optimize with the new session. Set false for the original fully-mutable "True
+    //   SLAM-continue" (loaded poses free to shift under new loop closures).
+    // freeze_prior_precision: stiffness of that pin. 1e10 ~= rigid (recommended for a manually verified
+    //   map you overlay a 2D global map onto); lower toward 1e6 for "reasonably fixed" (tiny give).
+    "continue_from_map_path": "",
+    "save_map_path": "",
+    "freeze_loaded_map": true,
+    "freeze_prior_precision": 1e10,
+    "reloc_method": "yaw_sweep",
+    "reloc_yaw_step_deg": 15.0,
+    "reloc_voxel_resolution": 0.5,
+    "reloc_fpfh_radius": 2.5,
+    "reloc_dof": 4,
+    "reloc_search_radius_m": 3.0,
+    "reloc_start_area_radius_m": 20.0,
+    "reloc_min_inlier_rate": 0.3,
+    "reloc_max_submaps": 10,
+    "reloc_refine": true,
+    "reloc_refine_max_correction": 1.0,
+    "reloc_refine_min_inlier_rate": 0.6,
+    "reloc_registration": "RANSAC",
+    "num_threads": 4
   }
 }

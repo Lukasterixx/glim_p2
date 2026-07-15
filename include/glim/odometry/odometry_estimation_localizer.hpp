@@ -56,6 +56,9 @@ public:
   int vgicp_voxelmap_levels;            ///< Multi-resolution voxelmap levels (for VGICP)
   double vgicp_voxelmap_scaling_factor; ///< Multi-resolution voxelmap scaling factor (for VGICP)
 
+  // Prior-map visualization
+  double viz_voxel_resolution;          ///< Voxel size (m) for the full prior-map cloud sent to viewers (<=0 keeps every point)
+
   // Live rolling local map ("mapping for robustness, not for persistence").
   // A short LRU-bounded voxelmap fed by the live scans, matched against IN ADDITION to the fixed
   // prior map. It fills geometric gaps where the prior map is too sparse for a stable frame-to-map

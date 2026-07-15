@@ -118,6 +118,14 @@ struct GlobalMappingCallbacks {
   static CallbackSlot<void(const std::vector<SubMap::Ptr>& submaps)> on_update_submaps;
 
   /**
+   * @brief Session-continuation relocalization callback
+   * @param T_map_odom  Initial map offset: the rigid transform placing this session's odometry/world
+   *                    origin into the loaded prior-map frame (prior_map <- new_session_odom). Fired
+   *                    once, on the global-mapping thread, when the new session locks onto the prior map.
+   */
+  static CallbackSlot<void(const Eigen::Isometry3d& T_map_odom)> on_relocalized;
+
+  /**
    * @brief Global optimization callback (just before optimization)
    * @param isam2        iSAM2 Optimizer
    * @param new_factors  New factors to be inserted into the factor graph

@@ -7,8 +7,9 @@
     "config_viewer": "config_viewer.json",
     "config_sensors": "config_sensors.json",
     "config_preprocess": "config_preprocess.json",
-    // Odometry frontend. Swap to "config_odometry_localizer.json" to localize within a saved map,
-    // or "config_odometry_external.json" for sim-mode (trust an external odom->lidar TF).
+    // Odometry frontend. To load and CONTINUE a saved map ("as if GLIM was never turned off"),
+    // leave this as the normal odometry and set global_mapping/continue_from_map_path instead.
+    // Use "config_odometry_external.json" for sim-mode (trust an external odom->lidar TF).
     "config_odometry": "config_odometry_gpu.json",
     "config_sub_mapping": "config_sub_mapping_gpu.json",
     "config_global_mapping": "config_global_mapping_gpu.json",

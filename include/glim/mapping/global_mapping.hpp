@@ -13,12 +13,15 @@ class NonlinearFactorGraph;
 namespace gtsam_points {
 class ISAM2Ext;
 class StreamTempBufferRoundRobin;
+class GaussianVoxelMapCPU;
+class PointCloudCPU;
 struct ISAM2ResultExt;
 }  // namespace gtsam_points
 
 namespace glim {
 
 class IMUIntegration;
+class MapAligner;
 
 /**
  * @brief Global mapping parameters
@@ -34,6 +37,48 @@ public:
   bool enable_optimization;
   bool enable_between_factors;
   std::string between_registration_type;
+
+  // --- Session continuation ("as if GLIM was never turned off") ---
+  // If non-empty, load this saved-map directory at startup and keep mapping onto it: the loaded
+  // submaps come back as optimizable variables, the new session is relocalized onto them (FPFH +
+  // RANSAC/GNC on the first new submap), and normal overlap-based loop closure ties old and new
+  // poses together. The loaded map is NEVER overwritten -- save() redirects to a sibling folder.
+  std::string continue_from_map_path;   ///< Prior map dir to load and extend ("" disables continuation)
+  std::string save_map_path;            ///< Explicit output dir for the grown map ("" => "<loaded>_continued")
+
+  // Loaded-map rigidity. When true (default), every loaded submap is pinned to its saved pose with a
+  // strong pose prior, so the certified prior map stays put and acts as drift-free truth: new-session
+  // submaps register AGAINST it (their live pose is corrected toward the fixed map) instead of the map
+  // drifting to co-optimize with the new session. When false, the loaded submaps are fully free
+  // variables and can shift under new loop closures (the original "True SLAM-continue" behavior).
+  bool freeze_loaded_map;               ///< Pin loaded submaps to their saved poses (default true)
+  double freeze_prior_precision;        ///< Isotropic precision of the per-submap pin prior (1e10 ~= rigid, 1e6 ~= reasonably fixed)
+
+  // Relocalization (new-session -> prior-map) knobs, mirroring the localizer bootstrap gates.
+  double reloc_voxel_resolution;        ///< Voxel downsample for map + source before FPFH
+  double reloc_fpfh_radius;             ///< FPFH feature search radius [m]
+  int reloc_dof;                        ///< 4 (XYZ+yaw) or 6 (full SE3) for the global registration
+  double reloc_search_radius_m;         ///< Reject a solution whose translation exceeds this (the spawn radius)
+  double reloc_start_area_radius_m;     ///< If >0, build the FPFH target from ONLY the map points within this radius of the map start (submap 0). Kills global self-similarity; use when the robot always reboots near where the prior run began. <=0 => whole-map (global) target.
+  double reloc_min_inlier_rate;         ///< Reject a coarse (FPFH) solution below this RANSAC/GNC inlier rate
+  std::string reloc_registration;       ///< "RANSAC" (default; falls back to GNC) or "GNC"
+  int num_threads;                      ///< Threads for the relocalization registration
+
+  // Relocalization method. "yaw_sweep" (default): exploit the near-start prior directly — anchor the
+  // first new submap onto the map's first submap and sweep yaw hypotheses, VGICP-refining each and
+  // keeping the best. No FPFH feature dependence; ideal when the robot always reboots near the prior
+  // start at an unknown heading. "fpfh": global FPFH+RANSAC/GNC coarse fix then VGICP refine.
+  std::string reloc_method;             ///< "yaw_sweep" (default) or "fpfh"
+  double reloc_yaw_step_deg;            ///< Yaw hypothesis spacing for the sweep [deg] (smaller = safer, more candidates)
+
+  // Relocalization robustness: new submaps are buffered (kept out of the graph) until a confident
+  // fix, retrying with the ACCUMULATED cloud as each submap arrives (a moving start only grows the
+  // source geometry). A coarse FPFH fix is then fine-refined with VGICP against the prior map and
+  // gated on the refine result, which is far more discriminative than the raw FPFH inlier rate.
+  int reloc_max_submaps;                ///< Give up (identity fallback + damping anchor) after this many buffered submaps / failed attempts
+  bool reloc_refine;                    ///< Fine-refine the coarse FPFH pose with VGICP before accepting it
+  double reloc_refine_max_correction;   ///< Reject a refinement that moves more than this from the coarse pose [m]
+  double reloc_refine_min_inlier_rate;  ///< Reject a refinement whose VGICP inlier fraction is below this
 
   std::string registration_error_factor_type;
   double submap_voxel_resolution;
@@ -75,10 +120,42 @@ public:
    * @brief Load a mapping result from a dumped directory
    * @param path Input dump path
    */
-  bool load(const std::string& path);
+  bool load(const std::string& path) override;
 
 private:
   void insert_submap(int current, const SubMap::Ptr& submap);
+
+  /// @brief Actual graph insertion of a submap (the pre-continuation insert_submap body).
+  ///        In continuation mode this is only reached once relocalization has succeeded or been
+  ///        abandoned; the public insert_submap buffers submaps until then.
+  void insert_submap_internal(const SubMap::Ptr& submap);
+
+  /// @brief Perform the deferred prior-map load (continuation mode) on the first runtime data call,
+  ///        so the loaded submaps' on_insert_submap callbacks reach an already-subscribed viewer.
+  void ensure_prior_map_loaded();
+
+  /// @brief Fallback when the new session cannot be aligned to the loaded map: discard the loaded map
+  ///        from the active graph (the original on disk is untouched) and restart as a fresh mapping
+  ///        session. save() still redirects the fresh map into the continuation output folder.
+  void reset_to_fresh_mapping();
+
+  /// @brief FPFH+RANSAC/GNC-register the ACCUMULATED pending-submap cloud onto the prior map, then
+  ///        (optionally) VGICP-fine-refine and gate the result. On success sets T_map_odom and
+  ///        `relocalized`; after reloc_max_submaps failures sets `reloc_abandoned`.
+  void try_relocalize_pending();
+
+  /// @brief VGICP fine-refinement of the coarse FPFH pose against the prior-map refine voxelmaps.
+  ///        Updates T_map_odom_coarse in place; false = rejected (gates: max correction, inlier rate).
+  bool refine_relocalization(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& T_map_odom_coarse);
+
+  /// @brief Yaw-sweep relocalizer: anchor the first pending submap onto the map's first submap, sweep
+  ///        yaw hypotheses about that anchor, VGICP-refine each against the full-map voxelmaps, and
+  ///        keep the highest-inlier fit that lands within the spawn radius. Sets out_T; false = none passed.
+  bool relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& out_T);
+
+  /// @brief VGICP-fit `src` (odom frame) to the full-map voxelmaps from initial guess `T_init`.
+  ///        Returns the refined pose and its finest-level inlier fraction.
+  std::pair<Eigen::Isometry3d, double> vgicp_fit(const std::shared_ptr<gtsam_points::PointCloudCPU>& src, const Eigen::Isometry3d& T_init, int max_iterations) const;
 
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_between_factors(int current) const;
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_matching_cost_factors(int current) const;
@@ -95,6 +172,18 @@ private:
 
   std::mt19937 mt;
   int session_id;
+
+  // --- Session continuation state (all touched only on the global-mapping thread) ---
+  bool prior_map_load_done = false;               ///< The deferred prior-map load has run
+  bool continuation_mode = false;                 ///< A prior map was loaded and is being extended
+  int continuation_start_id = -1;                 ///< id of the first NEW submap (= number of loaded submaps)
+  bool relocalized = false;                        ///< The new session was successfully aligned onto the prior map
+  bool reloc_abandoned = false;                    ///< Too many failed attempts (consumed by the fresh-mapping fallback)
+  bool continuation_save_redirect = false;         ///< A continuation was attempted; save() still redirects to the continue folder even after a fresh-mapping fallback
+  Eigen::Isometry3d T_map_odom = Eigen::Isometry3d::Identity();  ///< prior-map <- new-session odom/world
+  std::shared_ptr<MapAligner> aligner;            ///< FPFH global-alignment target built from the loaded map
+  std::vector<SubMap::Ptr> pending_submaps;       ///< New submaps buffered (out of the graph) until relocalization resolves
+  std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapCPU>> reloc_refine_voxelmaps;  ///< Map-frame VGICP targets for the fine refinement (from the same cloud as the FPFH target)
 
   std::unique_ptr<IMUIntegration> imu_integration;
   std::any stream_buffer_roundrobin;

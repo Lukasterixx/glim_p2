@@ -21,6 +21,26 @@
     // Optimizer settings
     "use_isam2_dogleg": false,
     "isam2_relinearize_skip": 1,
-    "isam2_relinearize_thresh": 0.1
+    "isam2_relinearize_thresh": 0.1,
+    // Session continuation ("as if GLIM was never turned off"). See config_global_mapping_gpu.json
+    // for full docs. Empty continue_from_map_path = normal (fresh) mapping.
+    "continue_from_map_path": "",
+    "save_map_path": "",
+    "freeze_loaded_map": true,
+    "freeze_prior_precision": 1e10,
+    "reloc_method": "yaw_sweep",
+    "reloc_yaw_step_deg": 15.0,
+    "reloc_voxel_resolution": 0.5,
+    "reloc_fpfh_radius": 2.5,
+    "reloc_dof": 4,
+    "reloc_search_radius_m": 3.0,
+    "reloc_start_area_radius_m": 20.0,
+    "reloc_min_inlier_rate": 0.3,
+    "reloc_max_submaps": 10,
+    "reloc_refine": true,
+    "reloc_refine_max_correction": 1.0,
+    "reloc_refine_min_inlier_rate": 0.6,
+    "reloc_registration": "RANSAC",
+    "num_threads": 4
   }
 }

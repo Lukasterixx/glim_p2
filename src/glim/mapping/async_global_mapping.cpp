@@ -67,6 +67,14 @@ void AsyncGlobalMapping::save(const std::string& path) {
   logger->info("saved");
 }
 
+bool AsyncGlobalMapping::load(const std::string& path) {
+  logger->info("loading from {}...", path);
+  std::lock_guard<std::mutex> lock(global_mapping_mutex);
+  const bool ok = global_mapping->load(path);
+  logger->info(ok ? "loaded" : "load failed");
+  return ok;
+}
+
 gtsam_points::PointCloud::Ptr AsyncGlobalMapping::export_points() {
   std::lock_guard<std::mutex> lock(global_mapping_mutex);
   logger->info("exporting points");

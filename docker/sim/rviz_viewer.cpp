@@ -111,6 +111,41 @@ std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclc
   lidar_pose_corrected_pub = node.create_publisher<geometry_msgs::msg::PoseStamped>("~/lidar_pose_corrected", 10);
   lidar_pose_scanend_corrected_pub = node.create_publisher<geometry_msgs::msg::PoseStamped>("~/lidar_pose_scanend_corrected", 10);
 
+  // --- Session-continuation initial map offset ---
+  // Publish the relocalization result (prior_map <- new_session_odom) once, on a LATCHED topic so a
+  // late-joining consumer (e.g. the nav stack) still receives the boot alignment. This is the discrete
+  // "where did this run's odom origin land inside the loaded map" that the retired localizer used to
+  // emit as saved_map->odom; the live map->odom TF still carries the same alignment continuously.
+  // The class header lives upstream in glim_ros2, so we hold the publisher/clock in statics captured by
+  // the callback lambda rather than adding members. Fires on the global-mapping thread.
+  {
+    static rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr map_offset_pub =
+      node.create_publisher<geometry_msgs::msg::PoseStamped>("~/map_offset", rclcpp::QoS(1).transient_local());
+    const auto clock = node.get_clock();
+    GlobalMappingCallbacks::on_relocalized.add([this, clock](const Eigen::Isometry3d& T_map_odom) {
+      const Eigen::Quaterniond q(T_map_odom.linear());
+      geometry_msgs::msg::PoseStamped msg;
+      msg.header.stamp = clock->now();
+      msg.header.frame_id = map_frame_id;
+      msg.pose.position.x = T_map_odom.translation().x();
+      msg.pose.position.y = T_map_odom.translation().y();
+      msg.pose.position.z = T_map_odom.translation().z();
+      msg.pose.orientation.x = q.x();
+      msg.pose.orientation.y = q.y();
+      msg.pose.orientation.z = q.z();
+      msg.pose.orientation.w = q.w();
+      map_offset_pub->publish(msg);
+      const double yaw = std::atan2(T_map_odom.linear()(1, 0), T_map_odom.linear()(0, 0));
+      logger->info(
+        "published initial map offset on ~/map_offset (frame '{}'): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg",
+        map_frame_id,
+        T_map_odom.translation().x(),
+        T_map_odom.translation().y(),
+        T_map_odom.translation().z(),
+        yaw * 180.0 / M_PI);
+    });
+  }
+
   return {};
 }
 
