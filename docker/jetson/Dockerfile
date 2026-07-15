@@ -128,10 +128,10 @@ RUN git clone https://github.com/koide3/gtsam_points ${GTSAM_POINTS_DIR} && \
     echo "${GTSAM_PREFIX}/lib" > /etc/ld.so.conf.d/gtsam_points.conf && ldconfig
 
 # ------------------------------------------------------------------------------
-# LIVOX DEPS + SDK
+# LIVOX + ROS DEPS + SDK
 # ------------------------------------------------------------------------------
-# Placed AFTER the (cached) GTSAM layers so adding LiDAR support doesn't invalidate
-# the expensive gtsam / gtsam_points builds above.
+# Placed AFTER the (cached) GTSAM layers so adding these doesn't invalidate the
+# expensive gtsam / gtsam_points builds above.
 #
 # NOTE: No Iridescence / GLIM viewer — GLIM runs HEADLESS on the dog (built with
 # BUILD_WITH_VIEWER=OFF below), exactly like P2Dingo. Visualize remotely via
@@ -140,12 +140,22 @@ ENV LIVOX_WS=/root/ws_livox
 ENV LIVOX_SDK_PREFIX=/usr/local
 ENV LIVOX_SDK_DIR=/root/Livox-SDK2
 
-# rosidl toolchain for livox_ros_driver2's custom messages (CustomMsg/CustomPoint).
+# rosidl toolchain for livox_ros_driver2's custom messages (CustomMsg/CustomPoint),
+# plus the ROS message/tf packages the fork's ROS2 modules find_package() —
+# nav_msgs/geometry_msgs/tf2_eigen aren't on the base image, and rosdep skipped the
+# fork's `condition="$ROS_VERSION == 2"` deps (ROS_VERSION was empty). Install
+# explicitly so glim (imu_prediction / external / localizer modules) configures.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-rosidl-default-generators \
     ros-humble-rosidl-generator-dds-idl \
     ros-humble-rosidl-typesupport-fastrtps-cpp \
     ros-humble-rosidl-typesupport-fastrtps-c \
+    ros-humble-rclcpp ros-humble-rclcpp-components \
+    ros-humble-std-msgs ros-humble-std-srvs \
+    ros-humble-sensor-msgs ros-humble-nav-msgs ros-humble-geometry-msgs \
+    ros-humble-tf2 ros-humble-tf2-ros ros-humble-tf2-eigen ros-humble-tf2-geometry-msgs \
+    ros-humble-image-transport \
+    ros-humble-rosbag2-cpp ros-humble-rosbag2-storage-default-plugins \
  && rm -rf /var/lib/apt/lists/*
 
 # Livox SDK2 (required by livox_ros_driver2) — built from source like P2Dingo.
@@ -177,6 +187,7 @@ COPY . $WS/src/glim
 
 WORKDIR $WS
 RUN source /opt/ros/humble/setup.bash && \
+    export ROS_VERSION=2 && \
     rosdep update && \
     rosdep install --from-paths src --ignore-src -r -y || true
 
