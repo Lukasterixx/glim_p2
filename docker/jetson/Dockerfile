@@ -156,6 +156,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-tf2 ros-humble-tf2-ros ros-humble-tf2-eigen ros-humble-tf2-geometry-msgs \
     ros-humble-image-transport \
     ros-humble-rosbag2-cpp ros-humble-rosbag2-storage-default-plugins \
+    ros-humble-rosbag2-compression ros-humble-rosbag2-compression-zstd \
  && rm -rf /var/lib/apt/lists/*
 
 # Livox SDK2 (required by livox_ros_driver2) — built from source like P2Dingo.
