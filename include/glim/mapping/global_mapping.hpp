@@ -54,6 +54,14 @@ public:
   bool freeze_loaded_map;               ///< Pin loaded submaps to their saved poses (default true)
   double freeze_prior_precision;        ///< Isotropic precision of the per-submap pin prior (1e10 ~= rigid, 1e6 ~= reasonably fixed)
 
+  // Whether to APPLY the continuation relocalization (re-anchor the new session onto the prior map).
+  // Derived from glim_ros/publish_tf in config_ros: true on the real robot (GLIM owns the TF and the
+  // re-anchor is real), false in "sim mode" where an external source (Isaac Sim) owns the TF. When
+  // false, the relocalization is still COMPUTED and REPORTED (on ~/map_offset + logs) so it can be
+  // tested byte-for-byte against different spawn positions, but is NOT applied — the map keeps
+  // piggybacking the simulator's ground-truth odom frame.
+  bool apply_relocalization;
+
   // Relocalization (new-session -> prior-map) knobs, mirroring the localizer bootstrap gates.
   double reloc_voxel_resolution;        ///< Voxel downsample for map + source before FPFH
   double reloc_fpfh_radius;             ///< FPFH feature search radius [m]
@@ -137,7 +145,7 @@ private:
   /// @brief Fallback when the new session cannot be aligned to the loaded map: discard the loaded map
   ///        from the active graph (the original on disk is untouched) and restart as a fresh mapping
   ///        session. save() still redirects the fresh map into the continuation output folder.
-  void reset_to_fresh_mapping();
+  void reset_to_fresh_mapping(bool relocalization_failed = true);
 
   /// @brief FPFH+RANSAC/GNC-register the ACCUMULATED pending-submap cloud onto the prior map, then
   ///        (optionally) VGICP-fine-refine and gate the result. On success sets T_map_odom and
@@ -179,6 +187,7 @@ private:
   int continuation_start_id = -1;                 ///< id of the first NEW submap (= number of loaded submaps)
   bool relocalized = false;                        ///< The new session was successfully aligned onto the prior map
   bool reloc_abandoned = false;                    ///< Too many failed attempts (consumed by the fresh-mapping fallback)
+  bool reloc_report_only_done = false;             ///< Sim mode: alignment computed + reported, not applied (consumed by the fresh-mapping transition)
   bool continuation_save_redirect = false;         ///< A continuation was attempted; save() still redirects to the continue folder even after a fresh-mapping fallback
   Eigen::Isometry3d T_map_odom = Eigen::Isometry3d::Identity();  ///< prior-map <- new-session odom/world
   std::shared_ptr<MapAligner> aligner;            ///< FPFH global-alignment target built from the loaded map

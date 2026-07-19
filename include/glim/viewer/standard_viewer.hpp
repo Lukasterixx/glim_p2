@@ -77,6 +77,7 @@ private:
 
   bool show_submaps;
   bool show_factors;
+  bool show_initial_alignment;
 
   bool show_odometry_status;
   int last_id;

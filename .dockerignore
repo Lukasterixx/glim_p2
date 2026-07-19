@@ -1,4 +1,9 @@
-.git/*
+# Exclude all git metadata: the top-level repo .git AND nested submodule gitlinks.
+# thirdparty/gtsam_points/.git is a *file* (submodule gitlink) that otherwise collides
+# with the base image's existing /root/gtsam_points/.git *directory* during COPY
+# ("cannot replace to directory ... .git with file").
+.git
+**/.git
 docs/*
 docker/*
 # Keep the Livox+GLIM startup wrapper (see glim_p2_docker/Dockerfile step 7)

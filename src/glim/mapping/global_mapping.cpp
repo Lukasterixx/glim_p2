@@ -81,6 +81,27 @@ GlobalMappingParams::GlobalMappingParams() {
 
   // Session continuation
   continue_from_map_path = config.param<std::string>("global_mapping", "continue_from_map_path", "");
+
+  // Auto-continue: when no prior-map path is configured, resume from the default shutdown dump
+  // (/tmp/dump) whenever a valid dump is present there — i.e. GLIM "starts where it left off"
+  // automatically. A valid dump is one that GlobalMapping::load() can open, whose gate is the
+  // presence of graph.txt (see load() below). To force a fresh mapping run, delete the dump
+  // (the web dump-browser exposes this). Setting continue_from_map_path explicitly still wins.
+  // (In sim mode the prior map is still loaded and the relocalization is computed + reported, but
+  // the session is NOT re-anchored onto it — see apply_relocalization below.)
+  if (continue_from_map_path.empty()) {
+    const std::string auto_dump = "/tmp/dump";
+    boost::system::error_code ec;
+    if (boost::filesystem::exists(auto_dump + "/graph.txt", ec)) {
+      continue_from_map_path = auto_dump;
+      spdlog::info("global_mapping: auto-continue from existing dump at {} (delete the dump to map fresh)", auto_dump);
+    }
+  }
+
+  // Sim mode (glim_ros/publish_tf=false in config_ros) => compute + report the relocalization but do
+  // NOT apply it. On the real robot (publish_tf=true, or unset) apply it normally (re-anchor + TF).
+  apply_relocalization = Config(GlobalConfig::get_config_path("config_ros")).param<bool>("glim_ros", "publish_tf", true);
+
   save_map_path = config.param<std::string>("global_mapping", "save_map_path", "");
   freeze_loaded_map = config.param<bool>("global_mapping", "freeze_loaded_map", true);
   freeze_prior_precision = config.param<double>("global_mapping", "freeze_prior_precision", 1e10);
@@ -308,20 +329,44 @@ void GlobalMapping::try_relocalize_pending() {
   }
 
   if (ok) {
-    T_map_odom = correction;
-    T_map_odom.linear() = Eigen::Quaterniond(T_map_odom.linear()).normalized().toRotationMatrix();
-    relocalized = true;
-    const Eigen::Vector3d t = T_map_odom.translation();
-    const double yaw = std::atan2(T_map_odom.linear()(1, 0), T_map_odom.linear()(0, 0));
-    logger->info(
-      "continuation: relocalized the new session onto the prior map (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg",
-      params.reloc_method,
-      attempt,
-      t.x(),
-      t.y(),
-      t.z(),
-      yaw * 180.0 / M_PI);
-    GlobalMappingCallbacks::on_relocalized(T_map_odom);
+    correction.linear() = Eigen::Quaterniond(correction.linear()).normalized().toRotationMatrix();
+    const Eigen::Vector3d t = correction.translation();
+    const double yaw = std::atan2(correction.linear()(1, 0), correction.linear()(0, 0));
+
+    // Always REPORT the computed alignment on the latched ~/map_offset topic (+ the rviz log). This
+    // is the boot alignment for late-joining consumers on the robot AND the readout for the sim
+    // spawn-alignment robustness test. Reporting is independent of whether we apply it below.
+    GlobalMappingCallbacks::on_relocalized(correction);
+    // Hand the matched source cloud + accepted pose to the viewer so it can overlay a white preview
+    // on the loaded prior map (visual confirmation of where the new session locked on).
+    GlobalMappingCallbacks::on_relocalization_preview(src, correction);
+
+    if (params.apply_relocalization) {
+      // Real robot: APPLY it — re-anchor the new session onto the prior map.
+      T_map_odom = correction;
+      relocalized = true;
+      logger->info(
+        "continuation: relocalized the new session onto the prior map (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg",
+        params.reloc_method,
+        attempt,
+        t.x(),
+        t.y(),
+        t.z(),
+        yaw * 180.0 / M_PI);
+    } else {
+      // Sim mode: computed + reported only. Do NOT re-anchor — build the map fresh in the simulator's
+      // odom frame so it keeps piggybacking Isaac Sim's ground-truth TF (byte-for-byte the same
+      // alignment as the robot, minus the application). Consumed by insert_submap below.
+      reloc_report_only_done = true;
+      logger->info(
+        "continuation: [sim/report-only] alignment COMPUTED but NOT applied (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg — mapping fresh in the odom frame",
+        params.reloc_method,
+        attempt,
+        t.x(),
+        t.y(),
+        t.z(),
+        yaw * 180.0 / M_PI);
+    }
     return;
   }
 
@@ -462,13 +507,17 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
   // is flushed in order: the first pending submap gets the absolute (relocalized) placement, the
   // rest chain through odometry as usual. The IMU queue is untouched while buffering, so the
   // IMU factors between the flushed submaps are still created normally.
-  if (continuation_mode && !relocalized && !reloc_abandoned) {
+  if (continuation_mode && !relocalized && !reloc_abandoned && !reloc_report_only_done) {
     pending_submaps.push_back(submap);
     try_relocalize_pending();
     if (reloc_abandoned) {
       // Could not align to the loaded map: fall back to fresh mapping, then flush the buffered
       // submaps as the fresh session's first submaps.
       reset_to_fresh_mapping();
+    } else if (reloc_report_only_done) {
+      // Sim mode: the alignment was computed + reported but is intentionally NOT applied. Drop the
+      // loaded prior from the active graph and map fresh in the odom frame (this is not a failure).
+      reset_to_fresh_mapping(/*relocalization_failed=*/false);
     }
     if (relocalized || !continuation_mode) {
       std::vector<SubMap::Ptr> to_flush;
@@ -483,13 +532,19 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
   insert_submap_internal(submap);
 }
 
-void GlobalMapping::reset_to_fresh_mapping() {
-  logger->error("========================================================================");
-  logger->error("continuation: RELOCALIZATION FAILED — could not align the new session to the loaded map.");
-  logger->error("continuation: falling back to FRESH MAPPING. The loaded prior map is discarded for this run");
-  logger->error("continuation: (the original on disk is untouched); a brand-new map is built and saved into the");
-  logger->error("continuation: continuation output folder on shutdown.");
-  logger->error("========================================================================");
+void GlobalMapping::reset_to_fresh_mapping(bool relocalization_failed) {
+  if (relocalization_failed) {
+    logger->error("========================================================================");
+    logger->error("continuation: RELOCALIZATION FAILED — could not align the new session to the loaded map.");
+    logger->error("continuation: falling back to FRESH MAPPING. The loaded prior map is discarded for this run");
+    logger->error("continuation: (the original on disk is untouched); a brand-new map is built and saved into the");
+    logger->error("continuation: continuation output folder on shutdown.");
+    logger->error("========================================================================");
+  } else {
+    logger->info(
+      "continuation: [sim/report-only] alignment reported; building the map fresh in the odom frame "
+      "(the loaded prior map was used only as the alignment test target and is left untouched).");
+  }
 
   // Drop the loaded map from the active graph and start over with an empty optimizer.
   submaps.clear();
@@ -516,6 +571,7 @@ void GlobalMapping::reset_to_fresh_mapping() {
   continuation_mode = false;
   relocalized = false;
   reloc_abandoned = false;
+  reloc_report_only_done = false;
   continuation_start_id = -1;
   reloc_refine_voxelmaps.clear();
   aligner.reset();

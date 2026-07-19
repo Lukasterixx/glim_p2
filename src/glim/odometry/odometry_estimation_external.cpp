@@ -224,6 +224,9 @@ void OdometryEstimationExternal::run_alignment(std::vector<Eigen::Vector4d> src_
     const Eigen::Vector3d t = T_savedmap_odom.translation();
     const double yaw = std::atan2(T_savedmap_odom.linear()(1, 0), T_savedmap_odom.linear()(0, 0));
     logger->info("sim-mode initial alignment accepted: saved_map<-odom x={:.2f} y={:.2f} z={:.2f} yaw={:.1f}deg inlier_rate={:.2f}", t.x(), t.y(), t.z(), yaw * 180.0 / M_PI, result.inlier_rate);
+    // Hand the accumulated start scan + accepted pose to the viewer so it can overlay a white
+    // preview cloud on the loaded map (visual confirmation of the one-shot alignment).
+    Callbacks::on_initial_alignment(src_points, T_savedmap_odom);
   } else {
     logger->warn("sim-mode initial alignment did not pass the gates; re-accumulating and retrying");
   }

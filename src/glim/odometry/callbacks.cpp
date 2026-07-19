@@ -31,4 +31,6 @@ CallbackSlot<void(double)> OdometryEstimationCallbacks::on_smoother_corruption;
 
 CallbackSlot<void()> OdometryEstimationCallbacks::request_to_compute_covariances;
 
+CallbackSlot<void(const std::vector<Eigen::Vector4d>&, const Eigen::Isometry3d&)> OdometryEstimationCallbacks::on_initial_alignment;
+
 }  // namespace glim

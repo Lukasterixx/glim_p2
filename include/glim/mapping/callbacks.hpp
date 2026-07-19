@@ -126,6 +126,18 @@ struct GlobalMappingCallbacks {
   static CallbackSlot<void(const Eigen::Isometry3d& T_map_odom)> on_relocalized;
 
   /**
+   * @brief Session-continuation relocalization preview callback
+   * @param src_points_odom  The accumulated new-session source cloud used for the match, in the
+   *                         session/odom frame. Transform by T_map_odom to place it in the prior-map
+   *                         (viewer world) frame.
+   * @param T_map_odom       The accepted prior_map <- new_session_odom alignment (same as on_relocalized).
+   *
+   * Fired alongside on_relocalized (both sim report-only and real-robot apply modes) so a viewer can
+   * overlay the matched start cloud on the loaded prior map for visual confirmation of the alignment.
+   */
+  static CallbackSlot<void(const std::vector<Eigen::Vector4d>& src_points_odom, const Eigen::Isometry3d& T_map_odom)> on_relocalization_preview;
+
+  /**
    * @brief Global optimization callback (just before optimization)
    * @param isam2        iSAM2 Optimizer
    * @param new_factors  New factors to be inserted into the factor graph

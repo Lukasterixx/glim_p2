@@ -23,6 +23,7 @@ CallbackSlot<void(const SubMap::ConstPtr& frame)> GlobalMappingCallbacks::on_ins
 
 CallbackSlot<void(const std::vector<SubMap::Ptr>& submaps)> GlobalMappingCallbacks::on_update_submaps;
 CallbackSlot<void(const Eigen::Isometry3d& T_map_odom)> GlobalMappingCallbacks::on_relocalized;
+CallbackSlot<void(const std::vector<Eigen::Vector4d>&, const Eigen::Isometry3d&)> GlobalMappingCallbacks::on_relocalization_preview;
 
 CallbackSlot<void(gtsam_points::ISAM2Ext&, gtsam::NonlinearFactorGraph&, gtsam::Values&)> GlobalMappingCallbacks::on_smoother_update;
 CallbackSlot<void(gtsam_points::ISAM2Ext&, const gtsam_points::ISAM2ResultExt& result)> GlobalMappingCallbacks::on_smoother_update_result;

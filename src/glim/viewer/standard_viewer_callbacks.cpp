@@ -64,6 +64,25 @@ void StandardViewer::set_callbacks() {
     });
   });
 
+  // Initial-alignment preview: overlay the matched start cloud (white) at the pose the aligner
+  // matched it to, so the loaded prior map can be eyeballed for a good fit. Shared by two paths:
+  //   * OdometryEstimationExternal one-shot localization (sim `localize: true`), and
+  //   * GlobalMapping continue-mode relocalization (the default sim/robot session-continuation match).
+  const auto draw_alignment_preview = [this](const std::vector<Eigen::Vector4d>& src_points_odom, const Eigen::Isometry3d& T_map_odom_) {
+    auto points = std::make_shared<std::vector<Eigen::Vector4d>>(src_points_odom);
+    std::shared_ptr<Eigen::Isometry3d> T_map_odom(new Eigen::Isometry3d(T_map_odom_));
+    invoke([this, points, T_map_odom] {
+      auto viewer = guik::LightViewer::instance();
+      auto cloud_buffer = std::make_shared<glk::PointCloudBuffer>(*points);
+      viewer->update_drawable(
+        "initial_alignment_preview",
+        cloud_buffer,
+        guik::FlatColor(1.0f, 1.0f, 1.0f, 1.0f, T_map_odom->matrix().cast<float>()).set_point_scale(2.0f));
+    });
+  };
+  OdometryEstimationCallbacks::on_initial_alignment.add(draw_alignment_preview);
+  GlobalMappingCallbacks::on_relocalization_preview.add(draw_alignment_preview);
+
 #ifdef GLIM_USE_OPENCV
   // New image callback
   OdometryEstimationCallbacks::on_insert_image.add([this](const double stamp, const cv::Mat& image) {

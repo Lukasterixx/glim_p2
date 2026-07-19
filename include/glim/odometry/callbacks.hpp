@@ -142,6 +142,16 @@ struct OdometryEstimationCallbacks {
    *        Calling this while the odometry estimation is running may lead to undefined behavior.
    */
   static CallbackSlot<void()> request_to_compute_covariances;
+
+  /**
+   * @brief One-shot initial-alignment result callback (sim-mode localization against a saved map).
+   *
+   * Fired once when the accumulated start scan is globally aligned onto the loaded prior map.
+   * @param src_points_odom  Accumulated source scan, in the odom frame. Transform by
+   *                         T_savedmap_odom to place it in the saved-map (viewer world) frame.
+   * @param T_savedmap_odom  The accepted saved_map <- odom alignment.
+   */
+  static CallbackSlot<void(const std::vector<Eigen::Vector4d>& src_points_odom, const Eigen::Isometry3d& T_savedmap_odom)> on_initial_alignment;
 };
 
 }  // namespace glim

@@ -58,6 +58,10 @@ bool StandardViewer::drawable_filter(const std::string& name) {
     return false;
   }
 
+  if (!show_initial_alignment && starts_with(name, "initial_alignment")) {
+    return false;
+  }
+
   return true;
 }
 
@@ -128,6 +132,8 @@ void StandardViewer::drawable_selection() {
   ImGui::Checkbox("submaps", &show_submaps);
   ImGui::SameLine();
   ImGui::Checkbox("factors", &show_factors);
+  ImGui::SameLine();
+  ImGui::Checkbox("align preview", &show_initial_alignment);
 
   ImGui::Separator();
 
