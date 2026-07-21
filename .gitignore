@@ -1,3 +1,8 @@
 docs/html/*
 site/*
 imgui.ini
+
+# graphify knowledge graph — regenerable derived artifact (run `graphify update .`),
+# not versioned (it churns on every update and has no API-generated semantic content).
+# Mirrors the same rule in the P2Dingo repo.
+graphify-out/
