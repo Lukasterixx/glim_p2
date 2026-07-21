@@ -74,9 +74,13 @@ else
 fi
 
 # --- GLIM mode selection -----------------------------------------------------
-# auto (default): if the prior-map dump already holds a saved map, CONTINUE onto
-# it (load it and keep mapping, closing loops against it); otherwise map fresh.
-# Override with GLIM_MODE=mapping|localize (localize == continue).
+# There are exactly two modes:
+#   mapping  : build a fresh map and save it to the dump dir on shutdown.
+#   continue : load the saved map from the dump dir and keep mapping onto it
+#              (the new session relocalizes onto it, then loop-closes against it).
+# auto (default): pick `continue` if the dump already holds a saved map, else `mapping`.
+# Override with GLIM_MODE=mapping|continue. `localize`/`localise` are accepted as
+# deprecated aliases of `continue` (the old standalone localization mode is gone).
 GLIM_CONFIG_SRC="${GLIM_CONFIG_SRC:-/glim/config}"
 PRIOR_MAP_DIR="${PRIOR_MAP_DIR:-/tmp/dump}"
 GLIM_MODE="${GLIM_MODE:-auto}"
@@ -86,18 +90,21 @@ GLIM_CONFIG_ACTIVE=/tmp/glim_config_active
 prior_map_exists() { [ -f "$PRIOR_MAP_DIR/graph.bin" ] || [ -f "$PRIOR_MAP_DIR/graph.txt" ]; }
 
 case "$GLIM_MODE" in
-  auto)              prior_map_exists && GLIM_MODE=localize || GLIM_MODE=mapping ;;
-  localize|localise) GLIM_MODE=localize ;;
-  mapping|map)       GLIM_MODE=mapping ;;
+  auto)                       prior_map_exists && GLIM_MODE=continue || GLIM_MODE=mapping ;;
+  continue|cont)              GLIM_MODE=continue ;;
+  localize|localise)
+    echo "[container] NOTE: GLIM_MODE='$GLIM_MODE' is a deprecated alias for 'continue'."
+    GLIM_MODE=continue ;;
+  mapping|map)                GLIM_MODE=mapping ;;
   *) echo "[container] WARNING: unknown GLIM_MODE='$GLIM_MODE'; using auto"
-     prior_map_exists && GLIM_MODE=localize || GLIM_MODE=mapping ;;
+     prior_map_exists && GLIM_MODE=continue || GLIM_MODE=mapping ;;
 esac
 
 # Work on a writable copy (the mounted /glim/config is read-only).
 rm -rf "$GLIM_CONFIG_ACTIVE"
 cp -r "$GLIM_CONFIG_SRC" "$GLIM_CONFIG_ACTIVE"
 
-if [ "$GLIM_MODE" = "localize" ]; then
+if [ "$GLIM_MODE" = "continue" ]; then
   echo "[container] Prior map found in $PRIOR_MAP_DIR -> CONTINUE mode (loading it and mapping onto it, as if GLIM was never turned off)."
   # Keep the normal mapping pipeline (odometry + sub + global mapping all on), but load the prior
   # dump and continue onto it: the loaded submaps come back as optimizable variables, the new session

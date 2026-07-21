@@ -33,6 +33,13 @@ public:
   double submap_voxel_resolution;
   double min_dist_in_voxel;
   int max_num_points_in_voxel;
+
+  // First-submap bootstrap: hold the very first submap open for `bootstrap_duration_sec`, inserting
+  // EVERY frame's points (not just displacement keyframes). With a non-repeating LiDAR (e.g. Livox
+  // Mid360) this densifies coverage from a standstill, so continue-mode relocalization can run
+  // without the robot having to move. Only affects the first submap; normal submapping resumes after.
+  bool bootstrap_first_submap;
+  double bootstrap_duration_sec;
 };
 
 /**
@@ -57,6 +64,9 @@ private:
   Params params;
 
   int submap_count;
+
+  // Stamp of the first frame in the current (bootstrap) submap; -1 until the first frame arrives.
+  double bootstrap_start_stamp_;
 
   std::vector<EstimationFrame::ConstPtr> odom_frames;
   std::vector<EstimationFrame::ConstPtr> keyframes;

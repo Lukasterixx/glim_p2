@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include <glim/util/callback_slot.hpp>
 #include <glim/odometry/estimation_frame.hpp>
 #include <glim/mapping/sub_map.hpp>
@@ -136,6 +138,33 @@ struct GlobalMappingCallbacks {
    * overlay the matched start cloud on the loaded prior map for visual confirmation of the alignment.
    */
   static CallbackSlot<void(const std::vector<Eigen::Vector4d>& src_points_odom, const Eigen::Isometry3d& T_map_odom)> on_relocalization_preview;
+
+  /**
+   * @brief Session-continuation relocalization progress callback
+   * @param done     Work units finished so far within the current phase (e.g. yaw hypotheses fitted).
+   * @param total    Total work units in the current phase (0 = indeterminate/spinner).
+   * @param attempt  1-based relocalization attempt (grows as more submaps are buffered; see reloc_max_submaps).
+   * @param phase    Short human-readable phase label ("yaw-sweep", "refine", "fpfh", "done", ...).
+   *
+   * Fired repeatedly on the global-mapping thread while relocalization runs, so a viewer / the website
+   * can show a live progress bar during the (multi-second) initial alignment. Reporting only — carries
+   * no pose. Fires in both apply and report-only modes, mirroring on_relocalized.
+   */
+  static CallbackSlot<void(int done, int total, int attempt, const std::string& phase)> on_relocalization_progress;
+
+  /**
+   * @brief Session-continuation per-attempt relocalization CANDIDATE callback
+   * @param T_map_odom  The attempt's best-fit prior_map <- new_session_odom hypothesis (the same
+   *                    frame as on_relocalized), whether or not it passed the inlier gate.
+   * @param attempt     1-based relocalization attempt.
+   * @param accepted    true if this hypothesis passed the gate (== the one on_relocalized will report),
+   *                    false if it was rejected and another attempt will follow.
+   *
+   * Fired once per attempt on the global-mapping thread, INCLUDING rejected attempts, so a viewer /
+   * the website can watch the relocalizer step through its alignment choices in real time rather than
+   * only seeing the final accepted pose. Reporting only; never re-anchors anything.
+   */
+  static CallbackSlot<void(const Eigen::Isometry3d& T_map_odom, int attempt, bool accepted)> on_relocalization_candidate;
 
   /**
    * @brief Global optimization callback (just before optimization)

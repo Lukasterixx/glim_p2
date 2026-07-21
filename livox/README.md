@@ -43,23 +43,25 @@ docker compose build
 docker compose up
 ```
 
-## Mapping vs. localise (automatic)
+## Mapping vs. continue (automatic)
 
 `run_with_livox.sh` picks the mode from the mounted `docker/mid360/dump/` dir:
 
 - **empty dump → MAPPING**: GLIM builds a new map and saves it to `dump/` on clean
   shutdown (Ctrl+C / `docker compose down`).
-- **dump has a saved map (`graph.bin`/`graph.txt`) → LOCALISE**: GLIM loads that
-  map as a fixed prior and localizes within it (odometry → localizer, sub-mapping
-  → passthrough, global mapping off, so the prior map is never overwritten). Give
-  it a start pose with RViz **2D Pose Estimate** (publishes `/initialpose`).
+- **dump has a saved map (`graph.bin`/`graph.txt`) → CONTINUE**: GLIM loads that
+  map and keeps mapping onto it, as if it was never turned off. The full pipeline
+  stays on (odometry + sub-mapping + global mapping); the loaded submaps come back
+  as optimizable variables, the new session relocalizes onto them, and overlap-based
+  loop closure locks old and new poses together. The prior map is never overwritten
+  — the grown map is written to `dump/continued/`.
 
-So the second run onwards automatically localizes in the first run's map. To map
+So the second run onwards automatically extends the first run's map. To map
 again from scratch, clear the dump: `rm -rf docker/mid360/dump/*`.
 
 Override the auto choice via `environment:` in `docker-compose.yaml` (or `-e`):
-`GLIM_MODE=mapping` forces fresh mapping even with a map present; `GLIM_MODE=localize`
-forces localise. `PRIOR_MAP_DIR` changes which dir is used as the prior map.
+`GLIM_MODE=mapping` forces fresh mapping even with a map present; `GLIM_MODE=continue`
+forces continue. `PRIOR_MAP_DIR` changes which dir is used as the prior map.
 
 ## Verify topics
 

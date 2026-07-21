@@ -54,7 +54,7 @@
     //                          overlap-based loop closure locks old and new poses together. The loaded
     //                          map is never overwritten. Empty = normal (fresh) mapping.
     // save_map_path          : Explicit output dir for the grown map. Empty => "<loaded>_continued".
-    // reloc_*                : Relocalization (new-session -> prior-map) gates, as in the localizer bootstrap.
+    // reloc_*                : Relocalization (new-session -> prior-map) registration + acceptance gates.
     // freeze_loaded_map      : If true (default), pin loaded submaps to their saved poses so the prior
     //                          map is frozen drift-free truth (new session registers against it).
     // freeze_prior_precision : Pin stiffness. 1e10 ~= rigid; ~1e6 ~= reasonably fixed.

@@ -183,18 +183,6 @@ if(DEFINED ENV{ROS_VERSION} AND $ENV{ROS_VERSION} EQUAL 2)
   )
   ament_target_dependencies(odometry_estimation_external rclcpp tf2 tf2_ros tf2_eigen geometry_msgs)
   list(APPEND glim_LIBRARIES odometry_estimation_external)
-
-  # Localizer odometry frontend (localizes within a fixed, pre-loaded prior map)
-  add_library(odometry_estimation_localizer SHARED
-    src/glim/odometry/odometry_estimation_localizer.cpp
-    src/glim/odometry/odometry_estimation_localizer_ros2.cpp
-    src/glim/odometry/odometry_estimation_localizer_create.cpp
-  )
-  target_link_libraries(odometry_estimation_localizer
-    glim
-  )
-  ament_target_dependencies(odometry_estimation_localizer rclcpp tf2 tf2_ros tf2_eigen geometry_msgs nav_msgs)
-  list(APPEND glim_LIBRARIES odometry_estimation_localizer)
 endif()
 
 

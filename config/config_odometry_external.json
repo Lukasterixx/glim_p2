@@ -12,30 +12,12 @@
   //   odom_frame_id  (parent, used as the mapping world frame)
   //   lidar_frame_id (child, must match the point cloud frame)
   //
-  // --- Sim-mode one-shot localization against a saved map ---
-  // The external transform is ground-truth (never drifts), so localization is a ONE-SHOT initial
-  // alignment: accumulate a few seconds of scans, globally register them onto a saved map
-  // (FPFH + RANSAC/GNC, any yaw, within search_radius_m), and publish the saved_map->odom offset
-  // on ~/<offset_topic>. Mapping/visualization continue as when localize is off; no per-scan
-  // correction is applied. For a no-save localize session, also set enable_global_mapping:false
-  // in config_ros.json.
+  // To continue from / align onto a previously-saved map, use GlobalMapping session
+  // continuation (global_mapping/continue_from_map_path in config_global_mapping*.json).
   */
   "odometry_estimation": {
     "so_name": "libodometry_estimation_external.so",
     "num_threads": 4,
-    "lookup_timeout": 0.1,
-
-    "localize": false,
-    "prior_map_path": "/tmp/dump",
-    "accumulation_secs": 3.0,
-    "search_radius_m": 1.5,
-    "dof": 4,
-    "min_inlier_rate": 0.5,
-    "align_voxel_resolution": 0.5,
-    "align_fpfh_radius": 2.5,
-    "registration": "RANSAC",
-    "publish_tf": false,
-    "saved_map_frame_id": "saved_map",
-    "offset_topic": "map_localization"
+    "lookup_timeout": 0.1
   }
 }

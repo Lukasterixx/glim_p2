@@ -12,9 +12,11 @@
 // ---------------------------------------------------------------------------
 #include <glim_ros/rviz_viewer.hpp>
 
+#include <cstdio>
 #include <mutex>
 #include <spdlog/spdlog.h>
 #include <rclcpp/clock.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #define GLIM_ROS2
 #include <gtsam_points/types/point_cloud_cpu.hpp>
@@ -143,6 +145,59 @@ std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclc
         T_map_odom.translation().y(),
         T_map_odom.translation().z(),
         yaw * 180.0 / M_PI);
+    });
+  }
+
+  // --- Session-continuation relocalization progress ---
+  // Relocalization takes several seconds (a yaw sweep of dozens of VGICP fits). Stream its progress on a
+  // LATCHED std_msgs/String topic carrying a tiny JSON blob {phase, done, total, frac, attempt} so the
+  // website (relayed by the robot into spawn_align_request.json) can show a live bar during the
+  // confirmation-alignment wait, and RViz/foxglove can display it too. Latched depth-1 so a subscriber
+  // that connects mid-sweep immediately gets the latest value. Fires on the global-mapping thread.
+  {
+    static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr reloc_progress_pub =
+      node.create_publisher<std_msgs::msg::String>("~/reloc_progress", rclcpp::QoS(1).transient_local());
+    GlobalMappingCallbacks::on_relocalization_progress.add([](int done, int total, int attempt, const std::string& phase) {
+      const double frac = (total > 0) ? (static_cast<double>(done) / total) : (phase == "done" ? 1.0 : 0.0);
+      std_msgs::msg::String msg;
+      char buf[192];
+      std::snprintf(
+        buf,
+        sizeof(buf),
+        "{\"phase\":\"%s\",\"done\":%d,\"total\":%d,\"frac\":%.3f,\"attempt\":%d}",
+        phase.c_str(),
+        done,
+        total,
+        frac,
+        attempt);
+      msg.data = buf;
+      reloc_progress_pub->publish(msg);
+    });
+  }
+
+  // --- Per-attempt relocalization candidate poses ---
+  // Each attempt's best-fit hypothesis (accepted or rejected) is broadcast as a tiny JSON blob on a
+  // LATCHED std_msgs/String topic so the website (relayed + frame-converted by the robot into
+  // spawn_align_request.json) can animate the white scan through the relocalizer's choices, not just
+  // the final pose. x/y/yaw are the planar part of prior_map <- new_session_odom (== map->odom).
+  {
+    static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr reloc_candidate_pub =
+      node.create_publisher<std_msgs::msg::String>("~/reloc_candidate", rclcpp::QoS(1).transient_local());
+    GlobalMappingCallbacks::on_relocalization_candidate.add([](const Eigen::Isometry3d& T_map_odom, int attempt, bool accepted) {
+      const double yaw = std::atan2(T_map_odom.linear()(1, 0), T_map_odom.linear()(0, 0));
+      std_msgs::msg::String msg;
+      char buf[192];
+      std::snprintf(
+        buf,
+        sizeof(buf),
+        "{\"attempt\":%d,\"accepted\":%s,\"x\":%.4f,\"y\":%.4f,\"yaw\":%.5f}",
+        attempt,
+        accepted ? "true" : "false",
+        T_map_odom.translation().x(),
+        T_map_odom.translation().y(),
+        yaw);
+      msg.data = buf;
+      reloc_candidate_pub->publish(msg);
     });
   }
 

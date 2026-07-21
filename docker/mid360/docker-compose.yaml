@@ -49,9 +49,9 @@ services:
     stop_grace_period: 120s
 
     # Launch the Livox driver, then GLIM. run_with_livox.sh picks mapping vs
-    # localise from ./dump and appends `-p config_path:=...` itself, then forwards
+    # continue from ./dump and appends `-p config_path:=...` itself, then forwards
     # SIGINT to GLIM so the map dump still gets written. Force a mode with
-    # `GLIM_MODE=mapping` / `GLIM_MODE=localize` in `environment:` if needed.
+    # `GLIM_MODE=mapping` / `GLIM_MODE=continue` in `environment:` if needed.
     command: >
       run_with_livox.sh
       ros2 run glim_ros glim_rosnode

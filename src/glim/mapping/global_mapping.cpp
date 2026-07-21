@@ -223,6 +223,24 @@ void GlobalMapping::ensure_prior_map_loaded() {
       reloc_refine_voxelmaps.push_back(voxelmap);
     }
     logger->info("continuation: VGICP relocalization target ready ({} map points, {} levels)", cov_cloud->size(), reloc_refine_voxelmaps.size());
+
+#ifdef GTSAM_POINTS_USE_CUDA
+    // GPU mirror of the same target: the yaw-sweep runs dozens of VGICP fits, so pushing each fit onto
+    // the GPU turns a multi-minute, CPU-bound (num_threads-capped) sweep into a GPU-bound one — the win
+    // that matters on the Jetson, which has a strong GPU but few CPU cores. The GPU voxelmap wants a
+    // GPU-side source, so clone the cov cloud up once and reuse it for every level.
+    if (params.enable_gpu) {
+      auto cov_cloud_gpu = gtsam_points::PointCloudGPU::clone(*cov_cloud);
+      reloc_refine_voxelmaps_gpu.clear();
+      for (int i = 0; i < 2; i++) {
+        const double resolution = params.reloc_voxel_resolution * std::pow(2.0, i);
+        auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapGPU>(resolution);
+        voxelmap->insert(*cov_cloud_gpu);
+        reloc_refine_voxelmaps_gpu.push_back(voxelmap);
+      }
+      logger->info("continuation: GPU VGICP relocalization target ready ({} levels)", reloc_refine_voxelmaps_gpu.size());
+    }
+#endif
   }
 
   // FPFH coarse-registration target (only for the "fpfh" method). If a start-area radius is set, build
@@ -295,6 +313,7 @@ void GlobalMapping::try_relocalize_pending() {
   const int attempt = pending_submaps.size();
   bool ok = false;
   double coarse_inlier = -1.0;                       // FPFH-only diagnostic
+  double sweep_best_inlier = -1.0;                    // yaw-sweep: best hypothesis inlier (candidate gate)
   Eigen::Isometry3d correction = Eigen::Isometry3d::Identity();
 
   if (params.reloc_method == "yaw_sweep") {
@@ -303,7 +322,7 @@ void GlobalMapping::try_relocalize_pending() {
       reloc_abandoned = true;
       return;
     }
-    ok = relocalize_yaw_sweep(src, correction);
+    ok = relocalize_yaw_sweep(src, correction, &sweep_best_inlier);
   } else {  // "fpfh"
     if (!aligner || !aligner->valid()) {
       logger->error("continuation: no FPFH relocalization target; placing the new session at identity offset");
@@ -328,8 +347,18 @@ void GlobalMapping::try_relocalize_pending() {
     }
   }
 
+  correction.linear() = Eigen::Quaterniond(correction.linear()).normalized().toRotationMatrix();
+
+  // Broadcast this attempt's best-fit hypothesis as a visualization candidate — accepted OR rejected
+  // — so a viewer/website can watch the relocalizer step through its choices. yaw_sweep always leaves
+  // its best hypothesis in `correction` (skip only when nothing landed within the spawn radius:
+  // sweep_best_inlier < 0); fpfh's `correction` is only meaningful when it succeeded.
+  const bool has_candidate = (params.reloc_method == "yaw_sweep") ? (sweep_best_inlier >= 0.0) : ok;
+  if (has_candidate) {
+    GlobalMappingCallbacks::on_relocalization_candidate(correction, attempt, ok);
+  }
+
   if (ok) {
-    correction.linear() = Eigen::Quaterniond(correction.linear()).normalized().toRotationMatrix();
     const Eigen::Vector3d t = correction.translation();
     const double yaw = std::atan2(correction.linear()(1, 0), correction.linear()(0, 0));
 
@@ -337,6 +366,9 @@ void GlobalMapping::try_relocalize_pending() {
     // is the boot alignment for late-joining consumers on the robot AND the readout for the sim
     // spawn-alignment robustness test. Reporting is independent of whether we apply it below.
     GlobalMappingCallbacks::on_relocalized(correction);
+    // Snap the progress bar to complete so the website flips from "waiting" to "ready" in lockstep
+    // with the map_offset that on_relocalized emits.
+    GlobalMappingCallbacks::on_relocalization_progress(1, 1, attempt, "done");
     // Hand the matched source cloud + accepted pose to the viewer so it can overlay a white preview
     // on the loaded prior map (visual confirmation of where the new session locked on).
     GlobalMappingCallbacks::on_relocalization_preview(src, correction);
@@ -382,6 +414,11 @@ void GlobalMapping::try_relocalize_pending() {
   } else {
     logger->warn("continuation: relocalization attempt {}/{} failed; buffering submaps and retrying with more geometry", attempt, params.reloc_max_submaps);
   }
+
+  // Announce the failure on ~/reloc_progress so the website's bar resets instead of sitting at a
+  // full amber sweep: "failed" -> the bar empties and refills when the next attempt streams,
+  // "abandoned" -> terminal, no further attempts are coming. total=0 keeps frac at 0.
+  GlobalMappingCallbacks::on_relocalization_progress(0, 0, attempt, reloc_abandoned ? "abandoned" : "failed");
 }
 
 std::pair<Eigen::Isometry3d, double>
@@ -390,6 +427,36 @@ GlobalMapping::vgicp_fit(const std::shared_ptr<gtsam_points::PointCloudCPU>& src
   values.insert(gtsam::Key(0), gtsam::Pose3(T_init.matrix()));
 
   gtsam::NonlinearFactorGraph graph;
+
+#ifdef GTSAM_POINTS_USE_CUDA
+  // GPU fit: pose the (fixed) map-frame target voxelmaps against the source variable Key(0), one factor
+  // per resolution level, sharing the round-robin CUDA stream pool used elsewhere in this file. The GPU
+  // factor exposes the same inlier_fraction() the yaw-sweep gates on, so the caller is oblivious to the
+  // path taken. src carries covariances (added by the caller); clone them up to the GPU once.
+  if (params.enable_gpu && !reloc_refine_voxelmaps_gpu.empty()) {
+    auto src_gpu = gtsam_points::PointCloudGPU::clone(*src);
+    std::vector<const gtsam_points::IntegratedVGICPFactorGPU*> gpu_factors;  // owned by `graph`
+    for (const auto& voxelmap : reloc_refine_voxelmaps_gpu) {
+      const auto stream_buffer = std::any_cast<std::shared_ptr<gtsam_points::StreamTempBufferRoundRobin>>(stream_buffer_roundrobin)->get_stream_buffer();
+      const auto& stream = stream_buffer.first;
+      const auto& buffer = stream_buffer.second;
+      auto f = gtsam::make_shared<gtsam_points::IntegratedVGICPFactorGPU>(gtsam::Pose3(), gtsam::Key(0), voxelmap, src_gpu, stream, buffer);
+      graph.add(f);
+      gpu_factors.push_back(f.get());
+    }
+
+    gtsam_points::LevenbergMarquardtExtParams lm_params;
+    lm_params.setMaxIterations(max_iterations);
+    lm_params.setAbsoluteErrorTol(1e-3);
+    gtsam_points::LevenbergMarquardtOptimizerExt optimizer(graph, values, lm_params);
+    values = optimizer.optimize();
+
+    const Eigen::Isometry3d refined(values.at<gtsam::Pose3>(gtsam::Key(0)).matrix());
+    const double inlier_rate = gpu_factors.empty() ? 0.0 : gpu_factors.front()->inlier_fraction();
+    return {refined, inlier_rate};
+  }
+#endif
+
   std::vector<const gtsam_points::IntegratedVGICPFactor*> factors;  // owned by `graph`
   for (const auto& voxelmap : reloc_refine_voxelmaps) {
     auto f = gtsam::make_shared<gtsam_points::IntegratedVGICPFactor>(gtsam::Pose3(), gtsam::Key(0), voxelmap, src);
@@ -409,7 +476,10 @@ GlobalMapping::vgicp_fit(const std::shared_ptr<gtsam_points::PointCloudCPU>& src
   return {refined, inlier_rate};
 }
 
-bool GlobalMapping::relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& out_T) {
+bool GlobalMapping::relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& out_T, double* out_best_inlier) {
+  if (out_best_inlier) {
+    *out_best_inlier = -1.0;
+  }
   if (reloc_refine_voxelmaps.empty() || submaps.empty() || pending_submaps.empty()) {
     return false;
   }
@@ -433,6 +503,11 @@ bool GlobalMapping::relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src
 
   const double step = std::max(1.0, params.reloc_yaw_step_deg);
   const int num_hyp = static_cast<int>(std::ceil(360.0 / step));
+  const int attempt = static_cast<int>(pending_submaps.size());
+
+  // Drive a live progress bar (relayed to the website by the robot, RViz-visible on ~/reloc_progress):
+  // the yaw sweep is the dominant, multi-second cost, so report each fitted hypothesis.
+  GlobalMappingCallbacks::on_relocalization_progress(0, num_hyp, attempt, "yaw-sweep");
 
   double best_inlier = -1.0;
   Eigen::Isometry3d best_T = Eigen::Isometry3d::Identity();
@@ -448,19 +523,26 @@ bool GlobalMapping::relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src
     // Sanity gate: the first new submap must land within the spawn radius of the map's first submap.
     const Eigen::Vector3d landed = (T_ref * P0).translation();
     if ((landed - c).norm() > params.reloc_search_radius_m) {
+      GlobalMappingCallbacks::on_relocalization_progress(k + 1, num_hyp, attempt, "yaw-sweep");
       continue;
     }
     if (inlier > best_inlier) {
       best_inlier = inlier;
       best_T = T_ref;
     }
+    GlobalMappingCallbacks::on_relocalization_progress(k + 1, num_hyp, attempt, "yaw-sweep");
   }
 
   logger->info("continuation: yaw-sweep best inlier_rate={:.2f} over {} hypotheses (gate {:.2f})", best_inlier, num_hyp, params.reloc_refine_min_inlier_rate);
+  // Always hand back the best hypothesis found (out_best_inlier < 0 means none landed within the
+  // spawn radius), so the caller can broadcast even a rejected attempt as a visualization candidate.
+  out_T = best_T;
+  if (out_best_inlier) {
+    *out_best_inlier = best_inlier;
+  }
   if (best_inlier < params.reloc_refine_min_inlier_rate) {
     return false;
   }
-  out_T = best_T;
   return true;
 }
 
@@ -477,6 +559,9 @@ bool GlobalMapping::refine_relocalization(const std::vector<Eigen::Vector4d>& sr
     return false;
   }
   downsampled->add_covs(gtsam_points::estimate_covariances(downsampled->points, downsampled->size(), 10, params.num_threads));
+
+  // Indeterminate spinner for the single fine-fit (fpfh method only; the yaw sweep refines inline).
+  GlobalMappingCallbacks::on_relocalization_progress(0, 0, static_cast<int>(pending_submaps.size()), "refine");
 
   // VGICP-fit the source (odom frame) to the full-map voxelmaps from the coarse FPFH pose.
   const auto [refined, inlier_rate] = vgicp_fit(downsampled, T_map_odom_coarse, 30);

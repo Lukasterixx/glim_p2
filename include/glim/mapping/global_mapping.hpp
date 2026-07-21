@@ -14,6 +14,7 @@ namespace gtsam_points {
 class ISAM2Ext;
 class StreamTempBufferRoundRobin;
 class GaussianVoxelMapCPU;
+class GaussianVoxelMapGPU;
 class PointCloudCPU;
 struct ISAM2ResultExt;
 }  // namespace gtsam_points
@@ -62,7 +63,7 @@ public:
   // piggybacking the simulator's ground-truth odom frame.
   bool apply_relocalization;
 
-  // Relocalization (new-session -> prior-map) knobs, mirroring the localizer bootstrap gates.
+  // Relocalization (new-session -> prior-map) registration + acceptance gates.
   double reloc_voxel_resolution;        ///< Voxel downsample for map + source before FPFH
   double reloc_fpfh_radius;             ///< FPFH feature search radius [m]
   int reloc_dof;                        ///< 4 (XYZ+yaw) or 6 (full SE3) for the global registration
@@ -159,7 +160,7 @@ private:
   /// @brief Yaw-sweep relocalizer: anchor the first pending submap onto the map's first submap, sweep
   ///        yaw hypotheses about that anchor, VGICP-refine each against the full-map voxelmaps, and
   ///        keep the highest-inlier fit that lands within the spawn radius. Sets out_T; false = none passed.
-  bool relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& out_T);
+  bool relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src_points, Eigen::Isometry3d& out_T, double* out_best_inlier = nullptr);
 
   /// @brief VGICP-fit `src` (odom frame) to the full-map voxelmaps from initial guess `T_init`.
   ///        Returns the refined pose and its finest-level inlier fraction.
@@ -193,6 +194,7 @@ private:
   std::shared_ptr<MapAligner> aligner;            ///< FPFH global-alignment target built from the loaded map
   std::vector<SubMap::Ptr> pending_submaps;       ///< New submaps buffered (out of the graph) until relocalization resolves
   std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapCPU>> reloc_refine_voxelmaps;  ///< Map-frame VGICP targets for the fine refinement (from the same cloud as the FPFH target)
+  std::vector<std::shared_ptr<gtsam_points::GaussianVoxelMapGPU>> reloc_refine_voxelmaps_gpu;  ///< GPU mirror of reloc_refine_voxelmaps (built + used only when params.enable_gpu on a CUDA build)
 
   std::unique_ptr<IMUIntegration> imu_integration;
   std::any stream_buffer_roundrobin;

@@ -41,8 +41,8 @@ struct MapAlignmentResult {
  *
  * Loads a `GlobalMapping::save` dump (or takes a pre-loaded map cloud), builds an FPFH feature
  * target, and registers a source point cloud (given in a world/odom frame) onto it with NO initial
- * guess via `gtsam_points::estimate_pose_ransac`/`estimate_pose_gnc`. Used both for the sim one-shot
- * initial alignment (external frontend) and the real-robot localizer bootstrap.
+ * guess via `gtsam_points::estimate_pose_ransac`/`estimate_pose_gnc`. Used by GlobalMapping
+ * continue-mode relocalization to anchor a new session onto the loaded prior map.
  */
 class MapAligner {
 public:

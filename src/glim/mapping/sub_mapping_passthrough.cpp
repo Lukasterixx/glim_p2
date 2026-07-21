@@ -32,12 +32,16 @@ SubMappingPassthroughParams::SubMappingPassthroughParams() {
   submap_voxel_resolution = config.param<double>("sub_mapping", "submap_voxel_resolution", 0.5);
   min_dist_in_voxel = config.param<double>("sub_mapping", "min_dist_in_voxel", 0.1);
   max_num_points_in_voxel = config.param<int>("sub_mapping", "max_num_points_in_voxel", 100);
+
+  bootstrap_first_submap = config.param<bool>("sub_mapping", "bootstrap_first_submap", false);
+  bootstrap_duration_sec = config.param<double>("sub_mapping", "bootstrap_duration_sec", 3.0);
 }
 
 SubMappingPassthroughParams::~SubMappingPassthroughParams() {}
 
 SubMappingPassthrough::SubMappingPassthrough(const SubMappingPassthroughParams& params) : params(params) {
   submap_count = 0;
+  bootstrap_start_stamp_ = -1.0;
 
   voxelmap.reset(new VoxelMap(params.submap_voxel_resolution));
   voxelmap->set_lru_horizon(std::numeric_limits<int>::max());
@@ -56,6 +60,14 @@ void SubMappingPassthrough::insert_frame(const EstimationFrame::ConstPtr& odom_f
   const int current = odom_frames.size();
   odom_frames.emplace_back(odom_frame->clone_wo_points());
 
+  // First-submap bootstrap: accumulate EVERY frame's points (not just displacement keyframes) for a
+  // fixed time window, then force the submap. A non-repeating LiDAR (Mid360) fills in a dense scan
+  // from a standstill this way, so continue-mode relocalization can run without the robot moving.
+  const bool bootstrapping = params.bootstrap_first_submap && submap_count == 0;
+  if (bootstrapping && bootstrap_start_stamp_ < 0.0) {
+    bootstrap_start_stamp_ = odom_frame->stamp;
+  }
+
   // Check if the current frame should be inserted as a keyframe
   bool insert_as_keyframe = true;
   if (!keyframes.empty()) {
@@ -64,6 +76,10 @@ void SubMappingPassthrough::insert_frame(const EstimationFrame::ConstPtr& odom_f
     const double dr = Eigen::AngleAxisd(T_last_current.linear()).angle();
     insert_as_keyframe = dt > params.keyframe_update_interval_trans || dr > params.keyframe_update_interval_rot;
     logger->debug("dt={} dr={} keyframe={}", dt, dr, insert_as_keyframe);
+  }
+  // During the bootstrap window every frame contributes its (non-repeating) points.
+  if (bootstrapping) {
+    insert_as_keyframe = true;
   }
 
   if (insert_as_keyframe) {
@@ -78,7 +94,16 @@ void SubMappingPassthrough::insert_frame(const EstimationFrame::ConstPtr& odom_f
     logger->debug("num_voxels={}", voxelmap->num_voxels());
   }
 
-  auto new_submap = create_submap();
+  SubMap::Ptr new_submap;
+  if (bootstrapping) {
+    // Hold the first submap open until the bootstrap window elapses, then force it (single pose,
+    // dense accumulated cloud). Stamps are in seconds (odometry clock).
+    if (odom_frame->stamp - bootstrap_start_stamp_ >= params.bootstrap_duration_sec) {
+      new_submap = create_submap(true);
+    }
+  } else {
+    new_submap = create_submap();
+  }
 
   if (new_submap) {
     // A new submap is created
@@ -90,6 +115,7 @@ void SubMappingPassthrough::insert_frame(const EstimationFrame::ConstPtr& odom_f
     keyframes.clear();
     voxelmap->clear();
     num_voxels_history.clear();
+    bootstrap_start_stamp_ = -1.0;
   }
 }
 
