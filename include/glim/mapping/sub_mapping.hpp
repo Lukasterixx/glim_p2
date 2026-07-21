@@ -49,6 +49,17 @@ public:
   double submap_downsample_resolution;
   double submap_voxel_resolution;
   int submap_target_num_points;
+
+  // First-submap bootstrap (ported from SubMappingPassthrough so sim and robot share one
+  // localization phase). While the very first submap of a session is open, take EVERY frame as a
+  // keyframe and hold the submap open for `bootstrap_duration_sec` instead of until
+  // `max_num_keyframes`. A non-repeating LiDAR (Mid360) paints a dense scan from a standstill this
+  // way, so continue-mode relocalization gets a usable source cloud without the robot moving --
+  // otherwise OVERLAP keyframing never fires while stationary, no submap is ever emitted, and
+  // GlobalMapping::insert_submap (the only caller of try_relocalize_pending) never runs.
+  // Off by default: this only makes sense for continue/relocalization sessions.
+  bool bootstrap_first_submap;
+  double bootstrap_duration_sec;
 };
 
 /**
@@ -77,6 +88,9 @@ private:
 
   std::mt19937 mt;
   int submap_count;
+
+  // Stamp of the first frame of the current bootstrap submap; -1 when not bootstrapping.
+  double bootstrap_start_stamp_;
 
   std::unique_ptr<IMUIntegration> imu_integration;
   std::unique_ptr<CloudDeskewing> deskewing;

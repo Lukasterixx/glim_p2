@@ -61,6 +61,9 @@ SubMappingParams::SubMappingParams() {
   keyframe_voxelmap_levels = config.param<int>("sub_mapping", "keyframe_voxelmap_levels", 3);
   keyframe_voxelmap_scaling_factor = config.param<double>("sub_mapping", "keyframe_voxelmap_scaling_factor", 2.0);
 
+  bootstrap_first_submap = config.param<bool>("sub_mapping", "bootstrap_first_submap", false);
+  bootstrap_duration_sec = config.param<double>("sub_mapping", "bootstrap_duration_sec", 3.0);
+
   submap_downsample_resolution = config.param<double>("sub_mapping", "submap_downsample_resolution", 0.25);
   submap_voxel_resolution = config.param<double>("sub_mapping", "submap_voxel_resolution", 0.5);
   submap_target_num_points = config.param<int>("sub_mapping", "submap_target_num_points", -1);
@@ -75,6 +78,7 @@ SubMappingParams::~SubMappingParams() {}
 
 SubMapping::SubMapping(const SubMappingParams& params) : params(params) {
   submap_count = 0;
+  bootstrap_start_stamp_ = -1.0;
   imu_integration.reset(new IMUIntegration);
   deskewing.reset(new CloudDeskewing);
   covariance_estimation.reset(new CloudCovarianceEstimation);
@@ -113,6 +117,15 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
   EstimationFrame::Ptr odom_frame = delayed_input_queue.front()->clone();
   delayed_input_queue.pop_front();
   EstimationFrame::ConstPtr next_frame = delayed_input_queue.front();
+
+  // First-submap bootstrap: see SubMappingParams::bootstrap_first_submap. Applies only to the very
+  // first submap of the session; afterwards keyframing and submap creation are entirely normal, so
+  // subsequent relocalization retries are driven by the operator walking the robot around.
+  const bool bootstrapping = params.bootstrap_first_submap && submap_count == 0;
+  if (bootstrapping && bootstrap_start_stamp_ < 0.0) {
+    bootstrap_start_stamp_ = odom_frame->stamp;
+    logger->info("sub_mapping: bootstrapping the first submap for {:.1f}s (dense standstill accumulation)", params.bootstrap_duration_sec);
+  }
 
   if (params.enable_imu) {
     logger->debug("smoothing trajectory");
@@ -242,7 +255,9 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
     }
   }
 
-  bool insert_as_keyframe = keyframes.empty();
+  // While bootstrapping, every frame becomes a keyframe: OVERLAP/DISPLACEMENT keyframing never
+  // fires at a standstill (overlap stays ~1.0), which is precisely the case this feature exists for.
+  bool insert_as_keyframe = keyframes.empty() || bootstrapping;
   if (!insert_as_keyframe && odom_frame->frame && odom_frame->frame->size() > params.keyframe_update_min_points) {
     // Overlap-based keyframe update
     if (params.keyframe_update_strategy == "OVERLAP") {
@@ -272,8 +287,19 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
     insert_keyframe(current, odom_frame);
     Callbacks::on_new_keyframe(current, keyframes.back());
 
-    // Create registration error factors (fully connected)
-    for (int i = 0; i < keyframes.size() - 1; i++) {
+    // Create registration error factors (fully connected).
+    // Skipped while bootstrapping WHEN between-factors are available. This graph is O(N^2) in
+    // keyframes and the bootstrap deliberately takes EVERY frame, so a 3s window at 10Hz would build
+    // ~435 GPU VGICP factors instead of ~105 and LM-solve them -- seconds of Orin time spent at the
+    // spawn handshake, delaying the very relocalization attempt the bootstrap exists to trigger.
+    // The between-factor chain (plus the X(0) prior and the IMU factors) already constrains every
+    // pose, so the submap is still optimized, just in O(N). And the geometry those registration
+    // factors would refine is 3s of a STATIONARY robot -- there is no real drift for them to correct.
+    // If between-factors are off we must build them anyway: X(1..N) would otherwise have no pose
+    // constraint at all (only X(0) has a prior) and the solve would be indeterminate.
+    // Normal submaps (submap_count > 0) are never affected either way.
+    const bool create_registration_factors = !bootstrapping || !params.create_between_factors;
+    for (int i = 0; create_registration_factors && i < keyframes.size() - 1; i++) {
       if (keyframes[i]->frame->size() == 0 || keyframes.back()->frame->size() == 0) {
         logger->warn(
           "skip creation of registration error factors because keyframe has no points (keyframe[i]={}, keyframe[-1]={})",
@@ -321,7 +347,17 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
     odom_frames[odom_frames.size() - 2] = odom_frames[odom_frames.size() - 2]->clone_wo_points();
   }
 
-  auto new_submap = create_submap();
+  SubMap::Ptr new_submap;
+  if (bootstrapping) {
+    // Hold the first submap open until the bootstrap window elapses, then force it out regardless
+    // of keyframe count. Stamps are in seconds (odometry clock).
+    if (odom_frame->stamp - bootstrap_start_stamp_ >= params.bootstrap_duration_sec) {
+      logger->info("sub_mapping: bootstrap window elapsed, forcing the first submap ({} keyframes)", keyframes.size());
+      new_submap = create_submap(true);
+    }
+  } else {
+    new_submap = create_submap();
+  }
 
   if (new_submap) {
     new_submap->id = submap_count++;
@@ -333,6 +369,7 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
     keyframe_indices.clear();
     values.reset(new gtsam::Values);
     graph.reset(new gtsam::NonlinearFactorGraph);
+    bootstrap_start_stamp_ = -1.0;
   }
 }
 
