@@ -87,6 +87,7 @@ add_library(glim SHARED
   src/glim/odometry/map_alignment.cpp
   # mapping
   src/glim/mapping/callbacks.cpp
+  src/glim/mapping/reloc_override.cpp
   src/glim/mapping/sub_map.cpp
   src/glim/mapping/sub_mapping_base.cpp
   src/glim/mapping/global_mapping_base.cpp

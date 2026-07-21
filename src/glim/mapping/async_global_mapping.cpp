@@ -4,6 +4,7 @@
 
 #include <glim/util/logging.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/reloc_override.hpp>
 
 namespace glim {
 
@@ -84,8 +85,25 @@ gtsam_points::PointCloud::Ptr AsyncGlobalMapping::export_points() {
 
 void AsyncGlobalMapping::run() {
   auto last_optimization_time = std::chrono::high_resolution_clock::now();
+  auto last_override_poll_time = std::chrono::high_resolution_clock::time_point::min();
 
   while (!kill_switch) {
+    // Operator relocalization override: applied here rather than on the next submap. That wait was a
+    // deadlock in practice — a consumer blocked on the resulting map offset cannot drive the robot,
+    // and without driving there is no next submap.
+    //
+    // Throttled to 100 ms because a rejected override is NOT consumed: it can arrive before the
+    // prior map has even been loaded (that happens lazily on the first submap), and discarding it
+    // then would lose a perfectly valid confirm. So `pending()` can stay true indefinitely, and
+    // without the throttle this would take the mapping mutex on every iteration — i.e. at IMU rate
+    // while data is flowing.
+    const auto now = std::chrono::high_resolution_clock::now();
+    if (RelocOverride::pending() && now - last_override_poll_time > std::chrono::milliseconds(100)) {
+      last_override_poll_time = now;
+      std::lock_guard<std::mutex> lock(global_mapping_mutex);
+      global_mapping->apply_pending_reloc_override();
+    }
+
 #ifdef GLIM_USE_OPENCV
     auto images = input_image_queue.get_all_and_clear();
 #endif

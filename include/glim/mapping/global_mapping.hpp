@@ -122,6 +122,11 @@ public:
   virtual void find_overlapping_submaps(double min_overlap) override;
   virtual void optimize() override;
 
+  /// @brief Consume a waiting operator relocalization override and accept it immediately (bypassing
+  ///        the inlier gate), without waiting for the next submap to drive an attempt. No-op unless
+  ///        a continuation is in progress and unresolved.
+  virtual void apply_pending_reloc_override() override;
+
   virtual void save(const std::string& path) override;
   virtual gtsam_points::PointCloud::Ptr export_points() override;
 
@@ -152,6 +157,26 @@ private:
   ///        (optionally) VGICP-fine-refine and gate the result. On success sets T_map_odom and
   ///        `relocalized`; after reloc_max_submaps failures sets `reloc_abandoned`.
   void try_relocalize_pending();
+
+  /// @brief Accumulate all buffered pending submaps into one odom-frame source cloud (decimated per
+  ///        submap). Empty if nothing is buffered yet.
+  std::vector<Eigen::Vector4d> accumulate_pending_source() const;
+
+  /// @brief Post-attempt bookkeeping: fall back to fresh mapping if the attempt abandoned/report-only'd,
+  ///        then flush the buffered submaps into the graph once the continuation has resolved. MUST be
+  ///        called by every path that can resolve a continuation — the submap path and the operator
+  ///        override alike — or the buffered submaps are stranded.
+  void settle_relocalization_outcome();
+
+  /// @brief Commit an accepted alignment: report it (map_offset / progress "done" / preview) and, on the
+  ///        real robot, re-anchor the session onto the prior map. Shared by the autonomous success path
+  ///        and the operator override so both emit identical downstream state. `method` is log-only.
+  void accept_relocalization(const std::vector<Eigen::Vector4d>& src, const Eigen::Isometry3d& correction, int attempt, const std::string& method);
+
+  /// @brief Accept an operator-supplied alignment (see RelocOverride) UNCONDITIONALLY — the inlier gate
+  ///        is bypassed. Optionally VGICP-refines from their pose, keeping the operator's pose verbatim
+  ///        if the refine misses its trust gates. Never fails, never abandons.
+  void apply_operator_override(const std::vector<Eigen::Vector4d>& src, const Eigen::Isometry3d& T_override, int attempt);
 
   /// @brief VGICP fine-refinement of the coarse FPFH pose against the prior-map refine voxelmaps.
   ///        Updates T_map_odom_coarse in place; false = rejected (gates: max correction, inlier rate).

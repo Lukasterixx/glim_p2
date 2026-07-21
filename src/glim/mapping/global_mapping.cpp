@@ -35,6 +35,7 @@
 #include <glim/util/serialization.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/reloc_override.hpp>
 #include <glim/odometry/map_alignment.hpp>
 
 #ifdef GTSAM_USE_TBB
@@ -288,7 +289,7 @@ void GlobalMapping::ensure_prior_map_loaded() {
   }
 }
 
-void GlobalMapping::try_relocalize_pending() {
+std::vector<Eigen::Vector4d> GlobalMapping::accumulate_pending_source() const {
   // Accumulate ALL pending submaps into one odom-frame cloud. The submaps are mutually consistent
   // through odometry, so a moving start just grows the source geometry with every retry.
   std::vector<Eigen::Vector4d> src;
@@ -305,12 +306,29 @@ void GlobalMapping::try_relocalize_pending() {
       src.emplace_back(T * pts[i]);
     }
   }
+  return src;
+}
+
+void GlobalMapping::try_relocalize_pending() {
+  std::vector<Eigen::Vector4d> src = accumulate_pending_source();
   if (src.empty()) {
     logger->warn("continuation: pending submaps hold no points yet; retrying with the next submap");
     return;
   }
 
   const int attempt = pending_submaps.size();
+
+  // An operator override (the website's confirm — see RelocOverride) short-circuits the autonomous
+  // search entirely. Checked BEFORE the sweep/RANSAC so a confirm does not have to sit out another
+  // multi-second attempt whose answer it is about to discard.
+  {
+    Eigen::Isometry3d T_override;
+    if (RelocOverride::take(T_override)) {
+      apply_operator_override(src, T_override, attempt);
+      return;
+    }
+  }
+
   bool ok = false;
   double coarse_inlier = -1.0;                       // FPFH-only diagnostic
   double sweep_best_inlier = -1.0;                    // yaw-sweep: best hypothesis inlier (candidate gate)
@@ -347,6 +365,18 @@ void GlobalMapping::try_relocalize_pending() {
     }
   }
 
+  // Re-check the mailbox: the search above takes seconds, and an override that arrived during it
+  // (including the one that just broke the yaw sweep out of its loop) supersedes whatever it
+  // concluded. Without this the confirm would wait for the NEXT submap, which is exactly the delay
+  // the early break was meant to avoid.
+  {
+    Eigen::Isometry3d T_override;
+    if (RelocOverride::take(T_override)) {
+      apply_operator_override(src, T_override, attempt);
+      return;
+    }
+  }
+
   correction.linear() = Eigen::Quaterniond(correction.linear()).normalized().toRotationMatrix();
 
   // Broadcast this attempt's best-fit hypothesis as a visualization candidate — accepted OR rejected
@@ -359,66 +389,149 @@ void GlobalMapping::try_relocalize_pending() {
   }
 
   if (ok) {
-    const Eigen::Vector3d t = correction.translation();
-    const double yaw = std::atan2(correction.linear()(1, 0), correction.linear()(0, 0));
-
-    // Always REPORT the computed alignment on the latched ~/map_offset topic (+ the rviz log). This
-    // is the boot alignment for late-joining consumers on the robot AND the readout for the sim
-    // spawn-alignment robustness test. Reporting is independent of whether we apply it below.
-    GlobalMappingCallbacks::on_relocalized(correction);
-    // Snap the progress bar to complete so the website flips from "waiting" to "ready" in lockstep
-    // with the map_offset that on_relocalized emits.
-    GlobalMappingCallbacks::on_relocalization_progress(1, 1, attempt, "done");
-    // Hand the matched source cloud + accepted pose to the viewer so it can overlay a white preview
-    // on the loaded prior map (visual confirmation of where the new session locked on).
-    GlobalMappingCallbacks::on_relocalization_preview(src, correction);
-
-    if (params.apply_relocalization) {
-      // Real robot: APPLY it — re-anchor the new session onto the prior map.
-      T_map_odom = correction;
-      relocalized = true;
-      logger->info(
-        "continuation: relocalized the new session onto the prior map (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg",
-        params.reloc_method,
-        attempt,
-        t.x(),
-        t.y(),
-        t.z(),
-        yaw * 180.0 / M_PI);
-    } else {
-      // Sim mode: computed + reported only. Do NOT re-anchor — build the map fresh in the simulator's
-      // odom frame so it keeps piggybacking Isaac Sim's ground-truth TF (byte-for-byte the same
-      // alignment as the robot, minus the application). Consumed by insert_submap below.
-      reloc_report_only_done = true;
-      logger->info(
-        "continuation: [sim/report-only] alignment COMPUTED but NOT applied (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg — mapping fresh in the odom frame",
-        params.reloc_method,
-        attempt,
-        t.x(),
-        t.y(),
-        t.z(),
-        yaw * 180.0 / M_PI);
-    }
+    accept_relocalization(src, correction, attempt, params.reloc_method);
     return;
   }
 
-  if (attempt >= params.reloc_max_submaps) {
+  // reloc_max_submaps <= 0 means UNBOUNDED: keep buffering and retrying forever rather than falling
+  // back to fresh mapping. This is the mode that makes an operator override meaningful — the human
+  // needs the session to still be waiting, in continuation mode, whenever they get around to
+  // confirming. The escape hatch is unchanged: save() flushes whatever is still buffered.
+  const bool bounded = params.reloc_max_submaps > 0;
+  if (bounded && attempt >= params.reloc_max_submaps) {
     reloc_abandoned = true;  // consumed by the fresh-mapping fallback in insert_submap
     logger->error("continuation: relocalization abandoned after {} attempts", attempt);
-  } else if (params.reloc_method == "fpfh") {
-    logger->warn(
-      "continuation: relocalization attempt {}/{} failed (coarse inlier_rate={:.2f}); buffering submaps and retrying with more geometry",
-      attempt,
-      params.reloc_max_submaps,
-      coarse_inlier);
   } else {
-    logger->warn("continuation: relocalization attempt {}/{} failed; buffering submaps and retrying with more geometry", attempt, params.reloc_max_submaps);
+    const std::string of = bounded ? fmt::format("/{}", params.reloc_max_submaps) : std::string("/unbounded");
+    if (params.reloc_method == "fpfh") {
+      logger->warn(
+        "continuation: relocalization attempt {}{} failed (coarse inlier_rate={:.2f}); buffering submaps and retrying with more geometry "
+        "(an operator override on ~/reloc_override accepts a pose outright)",
+        attempt,
+        of,
+        coarse_inlier);
+    } else {
+      logger->warn(
+        "continuation: relocalization attempt {}{} failed; buffering submaps and retrying with more geometry "
+        "(an operator override on ~/reloc_override accepts a pose outright)",
+        attempt,
+        of);
+    }
   }
 
   // Announce the failure on ~/reloc_progress so the website's bar resets instead of sitting at a
   // full amber sweep: "failed" -> the bar empties and refills when the next attempt streams,
   // "abandoned" -> terminal, no further attempts are coming. total=0 keeps frac at 0.
   GlobalMappingCallbacks::on_relocalization_progress(0, 0, attempt, reloc_abandoned ? "abandoned" : "failed");
+}
+
+void GlobalMapping::accept_relocalization(const std::vector<Eigen::Vector4d>& src, const Eigen::Isometry3d& correction, int attempt, const std::string& method) {
+  const Eigen::Vector3d t = correction.translation();
+  const double yaw = std::atan2(correction.linear()(1, 0), correction.linear()(0, 0));
+
+  // Always REPORT the accepted alignment on the latched ~/map_offset topic (+ the rviz log). This is
+  // the boot alignment for late-joining consumers on the robot AND the readout for the sim
+  // spawn-alignment robustness test. Reporting is independent of whether we apply it below.
+  GlobalMappingCallbacks::on_relocalized(correction);
+  // Snap the progress bar to complete so the website flips from "waiting" to "ready" in lockstep
+  // with the map_offset that on_relocalized emits.
+  GlobalMappingCallbacks::on_relocalization_progress(1, 1, attempt, "done");
+  // Hand the matched source cloud + accepted pose to the viewer so it can overlay a white preview
+  // on the loaded prior map (visual confirmation of where the new session locked on). Skipped when
+  // there is no geometry yet (an override confirmed before the first submap closed) — an empty
+  // preview would blank the viewer's overlay rather than add to it.
+  if (!src.empty()) {
+    GlobalMappingCallbacks::on_relocalization_preview(src, correction);
+  }
+
+  if (params.apply_relocalization) {
+    // Real robot: APPLY it — re-anchor the new session onto the prior map.
+    T_map_odom = correction;
+    relocalized = true;
+    logger->info(
+      "continuation: relocalized the new session onto the prior map (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg",
+      method,
+      attempt,
+      t.x(),
+      t.y(),
+      t.z(),
+      yaw * 180.0 / M_PI);
+  } else {
+    // Sim mode: computed + reported only. Do NOT re-anchor — build the map fresh in the simulator's
+    // odom frame so it keeps piggybacking Isaac Sim's ground-truth TF (byte-for-byte the same
+    // alignment as the robot, minus the application). Consumed by insert_submap below.
+    reloc_report_only_done = true;
+    logger->info(
+      "continuation: [sim/report-only] alignment COMPUTED but NOT applied (method={}, attempt {}): t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg — mapping fresh "
+      "in the odom frame",
+      method,
+      attempt,
+      t.x(),
+      t.y(),
+      t.z(),
+      yaw * 180.0 / M_PI);
+  }
+}
+
+void GlobalMapping::apply_pending_reloc_override() {
+  // Applied the moment the override lands, NOT on the next submap. Relocalization attempts are
+  // driven by submap arrivals, so consuming it there meant the operator confirmed and then nothing
+  // visibly happened until the robot moved enough to close a submap — and nav could not start,
+  // because it waits on the map_offset that acceptance publishes. This runs on the global-mapping
+  // thread (polled by AsyncGlobalMapping under its mutex), so it is safe to touch the graph state.
+  if (!continuation_mode || relocalized || reloc_abandoned || reloc_report_only_done) {
+    return;  // nothing to relocalize onto, or already resolved; leave the mailbox for a fresh session
+  }
+
+  Eigen::Isometry3d T_override;
+  if (!RelocOverride::take(T_override)) {
+    return;
+  }
+
+  // Whatever geometry has accumulated so far — possibly none, if the confirm beat the first submap.
+  // apply_operator_override handles an empty source by accepting the pose verbatim.
+  apply_operator_override(accumulate_pending_source(), T_override, static_cast<int>(pending_submaps.size()));
+
+  // Same tail insert_submap runs after an attempt resolves. Skipping it here would strand every
+  // buffered submap: once `relocalized` is set, insert_submap never re-enters the branch that
+  // flushes them, and save() would later append the session's opening geometry AFTER everything
+  // that followed it — writing a graph with backwards odometry deltas to disk.
+  settle_relocalization_outcome();
+}
+
+void GlobalMapping::apply_operator_override(const std::vector<Eigen::Vector4d>& src, const Eigen::Isometry3d& T_override, int attempt) {
+  Eigen::Isometry3d correction = T_override;
+  std::string method = "operator";
+
+  // Refine, but NEVER reject. The operator either accepted a candidate the inlier gate had thrown
+  // out, or hand-placed the scan by eye — both are poses worth polishing with a bounded VGICP fit,
+  // and neither is a pose we are entitled to veto. refine_relocalization already applies exactly the
+  // gates we want (max correction + min inlier rate) and mutates its argument ONLY on success, so
+  // reuse it and simply reinterpret its rejection: not "relocalization failed", just "the operator's
+  // pose stands as given". Either branch accepts.
+  // The !empty() guard matters for the label: refine_relocalization returns true WITHOUT touching its
+  // argument when there are no refine voxelmaps, which would log "operator+refine" for a pose nothing
+  // refined. That log is the operator's only evidence of what GLIM did to their placement.
+  // src can be empty when the confirm arrives before the first submap closes — there is simply
+  // nothing to fit yet, so the operator's pose is taken verbatim (which is the intended fallback
+  // anyway).
+  if (params.reloc_refine && !reloc_refine_voxelmaps.empty() && !src.empty()) {
+    Eigen::Isometry3d refined = T_override;
+    if (refine_relocalization(src, refined)) {
+      correction = refined;
+      method = "operator+refine";
+    } else {
+      logger->info("continuation: operator override kept VERBATIM (the refine did not pass its trust gates; the operator's pose is authoritative)");
+    }
+  }
+
+  correction.linear() = Eigen::Quaterniond(correction.linear()).normalized().toRotationMatrix();
+
+  logger->warn("continuation: ACCEPTING an operator relocalization override at attempt {} — the inlier gate is bypassed", attempt);
+  // Report it as an accepted candidate too, so a viewer animating ~/reloc_candidate lands the scan on
+  // the same pose it is about to see on ~/map_offset instead of freezing on the last rejected guess.
+  GlobalMappingCallbacks::on_relocalization_candidate(correction, attempt, true);
+  accept_relocalization(src, correction, attempt, method);
 }
 
 std::pair<Eigen::Isometry3d, double>
@@ -510,8 +623,20 @@ bool GlobalMapping::relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src
   GlobalMappingCallbacks::on_relocalization_progress(0, num_hyp, attempt, "yaw-sweep");
 
   double best_inlier = -1.0;
+  bool interrupted = false;
+  int fitted = 0;
   Eigen::Isometry3d best_T = Eigen::Isometry3d::Identity();
   for (int k = 0; k < num_hyp; k++) {
+    // Bail out the moment an operator override lands. The mailbox is otherwise only polled between
+    // attempts, and with unbounded retries an attempt's cost grows with the accumulated source cloud
+    // — so late in a long wait, "confirm" could sit behind a sweep for longer than the robot's ack
+    // timeout. The override supersedes whatever this sweep would have concluded anyway.
+    if (RelocOverride::pending()) {
+      logger->info("continuation: yaw sweep interrupted at hypothesis {}/{} — an operator override is waiting", k, num_hyp);
+      interrupted = true;
+      break;
+    }
+    fitted = k + 1;
     const double theta = k * step * M_PI / 180.0;
     Eigen::Isometry3d twist = Eigen::Isometry3d::Identity();
     twist.linear() = Eigen::AngleAxisd(theta, Eigen::Vector3d::UnitZ()).toRotationMatrix();
@@ -533,14 +658,24 @@ bool GlobalMapping::relocalize_yaw_sweep(const std::vector<Eigen::Vector4d>& src
     GlobalMappingCallbacks::on_relocalization_progress(k + 1, num_hyp, attempt, "yaw-sweep");
   }
 
-  logger->info("continuation: yaw-sweep best inlier_rate={:.2f} over {} hypotheses (gate {:.2f})", best_inlier, num_hyp, params.reloc_refine_min_inlier_rate);
+  logger->info(
+    "continuation: yaw-sweep best inlier_rate={:.2f} over {}/{} hypotheses{} (gate {:.2f})",
+    best_inlier,
+    fitted,
+    num_hyp,
+    interrupted ? " [interrupted by an operator override]" : "",
+    params.reloc_refine_min_inlier_rate);
   // Always hand back the best hypothesis found (out_best_inlier < 0 means none landed within the
   // spawn radius), so the caller can broadcast even a rejected attempt as a visualization candidate.
   out_T = best_T;
   if (out_best_inlier) {
     *out_best_inlier = best_inlier;
   }
-  if (best_inlier < params.reloc_refine_min_inlier_rate) {
+  // A truncated sweep must never claim success, even if an early hypothesis happened to clear the
+  // gate: the operator's override supersedes it, and the caller consumes that override immediately
+  // after this returns. Returning false here keeps that guarantee local instead of relying on the
+  // caller's take() ordering to mask a partial result.
+  if (interrupted || best_inlier < params.reloc_refine_min_inlier_rate) {
     return false;
   }
   return true;
@@ -595,26 +730,34 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
   if (continuation_mode && !relocalized && !reloc_abandoned && !reloc_report_only_done) {
     pending_submaps.push_back(submap);
     try_relocalize_pending();
-    if (reloc_abandoned) {
-      // Could not align to the loaded map: fall back to fresh mapping, then flush the buffered
-      // submaps as the fresh session's first submaps.
-      reset_to_fresh_mapping();
-    } else if (reloc_report_only_done) {
-      // Sim mode: the alignment was computed + reported but is intentionally NOT applied. Drop the
-      // loaded prior from the active graph and map fresh in the odom frame (this is not a failure).
-      reset_to_fresh_mapping(/*relocalization_failed=*/false);
-    }
-    if (relocalized || !continuation_mode) {
-      std::vector<SubMap::Ptr> to_flush;
-      to_flush.swap(pending_submaps);
-      for (const auto& pending : to_flush) {
-        insert_submap_internal(pending);
-      }
-    }
+    settle_relocalization_outcome();
     return;
   }
 
   insert_submap_internal(submap);
+}
+
+void GlobalMapping::settle_relocalization_outcome() {
+  // Everything that must follow a relocalization attempt resolving, one way or the other. Extracted
+  // from insert_submap because an operator override can now resolve a continuation from OUTSIDE the
+  // submap path (apply_pending_reloc_override), and that path silently skipped the flush below —
+  // stranding every buffered submap, which save() then appended out of order into the graph.
+  if (reloc_abandoned) {
+    // Could not align to the loaded map: fall back to fresh mapping, then flush the buffered
+    // submaps as the fresh session's first submaps.
+    reset_to_fresh_mapping();
+  } else if (reloc_report_only_done) {
+    // Sim mode: the alignment was computed + reported but is intentionally NOT applied. Drop the
+    // loaded prior from the active graph and map fresh in the odom frame (this is not a failure).
+    reset_to_fresh_mapping(/*relocalization_failed=*/false);
+  }
+  if (relocalized || !continuation_mode) {
+    std::vector<SubMap::Ptr> to_flush;
+    to_flush.swap(pending_submaps);
+    for (const auto& pending : to_flush) {
+      insert_submap_internal(pending);
+    }
+  }
 }
 
 void GlobalMapping::reset_to_fresh_mapping(bool relocalization_failed) {
@@ -658,6 +801,9 @@ void GlobalMapping::reset_to_fresh_mapping(bool relocalization_failed) {
   reloc_abandoned = false;
   reloc_report_only_done = false;
   continuation_start_id = -1;
+  // There is no longer a prior map to align onto, so a late operator confirm (or a latched override
+  // replayed on reconnect) must not re-anchor this now-fresh session.
+  RelocOverride::clear();
   reloc_refine_voxelmaps.clear();
   aligner.reset();
 }

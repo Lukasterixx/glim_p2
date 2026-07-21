@@ -2,13 +2,18 @@
 // PATCHED COPY of glim_ros2 src/glim_ros/rviz_viewer.cpp (upstream master
 // fc72f4603ed2d3dffcdf94cda5617963afe57e82).
 //
-// Only change vs upstream: adds a `glim_ros/publish_tf` config flag (default
-// true) that, when false, suppresses GLIM's map->odom / odom->base (and
-// imu->lidar) TF broadcasts so an external source (e.g. Isaac Sim) can own the
-// transform tree while GLIM still builds/visualizes its map. See the marked
-// block in odometry_new_frame(). The sim Dockerfile COPYs this over the cloned
-// glim_ros2 source before building. Re-diff against upstream when bumping the
-// pinned glim_ros2 commit.
+// Changes vs upstream:
+//  1. A `glim_ros/publish_tf` config flag (default true) that, when false, suppresses
+//     GLIM's map->odom / odom->base (and imu->lidar) TF broadcasts so an external source
+//     (e.g. Isaac Sim) can own the transform tree while GLIM still builds/visualizes its
+//     map. See the marked block in odometry_new_frame().
+//  2. Session-continuation relocalization telemetry, all latched, all in create_subscriptions():
+//     ~/map_offset (PoseStamped T_map_odom), ~/reloc_progress and ~/reloc_candidate (String JSON).
+//  3. ~/reloc_override (PoseStamped, INBOUND) — the operator's confirmed alignment, fed to
+//     glim::RelocOverride and accepted unconditionally by GlobalMapping.
+//
+// The sim Dockerfile COPYs this over the cloned glim_ros2 source before building.
+// Re-diff against upstream when bumping the pinned glim_ros2 commit.
 // ---------------------------------------------------------------------------
 #include <glim_ros/rviz_viewer.hpp>
 
@@ -22,6 +27,7 @@
 #include <gtsam_points/types/point_cloud_cpu.hpp>
 #include <glim/odometry/callbacks.hpp>
 #include <glim/mapping/callbacks.hpp>
+#include <glim/mapping/reloc_override.hpp>
 #include <glim/util/logging.hpp>
 #include <glim/util/config.hpp>
 #include <glim/util/trajectory_manager.hpp>
@@ -157,19 +163,24 @@ std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclc
   {
     static rclcpp::Publisher<std_msgs::msg::String>::SharedPtr reloc_progress_pub =
       node.create_publisher<std_msgs::msg::String>("~/reloc_progress", rclcpp::QoS(1).transient_local());
-    GlobalMappingCallbacks::on_relocalization_progress.add([](int done, int total, int attempt, const std::string& phase) {
+    // `max` is the configured reloc_max_submaps: the attempt count at which the session gives up and
+    // falls back to fresh mapping. 0 == unbounded, i.e. no "abandoned" is ever coming and a consumer
+    // should render "attempt N" rather than "attempt N of M" / an imminent failure.
+    const int reloc_max = Config(GlobalConfig::get_config_path("config_global_mapping")).param<int>("global_mapping", "reloc_max_submaps", 10);
+    GlobalMappingCallbacks::on_relocalization_progress.add([reloc_max](int done, int total, int attempt, const std::string& phase) {
       const double frac = (total > 0) ? (static_cast<double>(done) / total) : (phase == "done" ? 1.0 : 0.0);
       std_msgs::msg::String msg;
-      char buf[192];
+      char buf[224];
       std::snprintf(
         buf,
         sizeof(buf),
-        "{\"phase\":\"%s\",\"done\":%d,\"total\":%d,\"frac\":%.3f,\"attempt\":%d}",
+        "{\"phase\":\"%s\",\"done\":%d,\"total\":%d,\"frac\":%.3f,\"attempt\":%d,\"max\":%d}",
         phase.c_str(),
         done,
         total,
         frac,
-        attempt);
+        attempt,
+        reloc_max);
       msg.data = buf;
       reloc_progress_pub->publish(msg);
     });
@@ -199,6 +210,47 @@ std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclc
       msg.data = buf;
       reloc_candidate_pub->publish(msg);
     });
+  }
+
+  // --- Operator relocalization override (INBOUND) ---
+  // The only inbound control on this node. Relocalization is otherwise autonomous and gates its
+  // answer on an inlier rate; on ambiguous geometry that gate rejects hypotheses a human watching
+  // the overlay can see are right (or nearly right). This topic is how their answer gets back in:
+  // the pose is T_map_odom in EXACTLY the frame ~/map_offset publishes and ~/reloc_candidate
+  // animates, so a consumer can take a candidate, nudge it, and hand it straight back.
+  //
+  // Accepted UNCONDITIONALLY — it bypasses the inlier gate; that is the point. GlobalMapping polls
+  // the mailbox at the top of each attempt, so it lands on the next submap (a few seconds), and
+  // consumes it, so a latched message replayed on reconnect cannot re-anchor a moved-on session.
+  // Latched depth-1 to match the outbound reloc topics: a confirm published before GLIM subscribed
+  // still arrives.
+  {
+    static rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr reloc_override_sub =
+      node.create_subscription<geometry_msgs::msg::PoseStamped>(
+        "~/reloc_override",
+        rclcpp::QoS(1).transient_local(),
+        // Capture the logger BY VALUE, not `this`: the subscription is held in a function-local
+        // static that outlives the RvizViewer, so a `this` capture would dangle if the viewer is
+        // destroyed while the node is still spinning during shutdown.
+        [logger = this->logger](const geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
+          Eigen::Isometry3d T_map_odom = Eigen::Isometry3d::Identity();
+          T_map_odom.translation() << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
+          const Eigen::Quaterniond q(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y, msg->pose.orientation.z);
+          if (q.norm() < 1e-6) {
+            logger->warn("ignoring an operator relocalization override with a degenerate orientation");
+            return;
+          }
+          T_map_odom.linear() = q.normalized().toRotationMatrix();
+
+          RelocOverride::set(T_map_odom);
+          const double yaw = std::atan2(T_map_odom.linear()(1, 0), T_map_odom.linear()(0, 0));
+          logger->warn(
+            "operator relocalization override received on ~/reloc_override: t=[{:.2f}, {:.2f}, {:.2f}] yaw={:.1f}deg — will be accepted on the next submap",
+            T_map_odom.translation().x(),
+            T_map_odom.translation().y(),
+            T_map_odom.translation().z(),
+            yaw * 180.0 / M_PI);
+        });
   }
 
   return {};

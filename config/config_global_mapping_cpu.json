@@ -36,7 +36,9 @@
     "reloc_search_radius_m": 3.0,
     "reloc_start_area_radius_m": 20.0,
     "reloc_min_inlier_rate": 0.3,
-    "reloc_max_submaps": 10,
+    // 0 == unbounded retries: keep buffering + retrying instead of giving up and falling back
+    // to fresh mapping, so an operator can still accept/adjust a pose on ~/reloc_override.
+    "reloc_max_submaps": 0,
     "reloc_refine": true,
     "reloc_refine_max_correction": 1.0,
     "reloc_refine_min_inlier_rate": 0.6,

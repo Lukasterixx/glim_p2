@@ -63,6 +63,16 @@ public:
   virtual void recover_graph();
 
   /**
+   * @brief Apply an operator relocalization override (glim::RelocOverride) if one is waiting.
+   *
+   * Polled by the executor between inputs so a human-confirmed alignment takes effect IMMEDIATELY
+   * rather than on the next submap — consumers block on the resulting map offset before they can
+   * start moving, so "on the next submap" is a deadlock for anything that has to drive to produce
+   * one. No-op by default; only session-continuation implementations do anything here.
+   */
+  virtual void apply_pending_reloc_override() {}
+
+  /**
    * @brief Save the mapping result
    * @param path  Save path
    */
